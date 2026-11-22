@@ -173,7 +173,7 @@
     if (!result.length) error(t('err.nothingToExport'));
     return {messages:result,warnings};
   }
-  function parseTree(data, leafId) {
+  function parseTree(data, leafId, {sourcePaths=false,maxMessages=Infinity}={}) {
     const map = data.mapping;
     if (!map || typeof map !== 'object') error(t('err.treeFormat'));
     // A DOM message id may differ from the mapping node id.
@@ -198,16 +198,27 @@
     }
     let cursor = selectedLeaf;
     if (!cursor || !map[cursor]) error(t('err.noBranch'));
-    const reversed = [], seen = new Set();
+    const reversed = [], seen = new Set(), keys = sourcePaths ? [] : null;
     while (cursor != null) {
       if (seen.has(cursor) || !map[cursor]) error(t('err.treeBroken'));
       seen.add(cursor); const node = map[cursor];
+      if(keys)keys.push(cursor);
+      if(seen.size>maxMessages)error(t('err.pageFormat'));
       if (node.message) reversed.push(node.message);
       cursor = node.parent;
     }
-    return {...records(reversed.reverse()), title:data.title || 'ChatGPT', branch:selectedLeaf};
+    const result=records(reversed.reverse());
+    if(keys){
+      const displayed=new Map(result.messages.map(m=>[m.id,m]));let segment=[];
+      for(const key of keys.reverse()){
+        if(!/^[\w-]{1,128}$/.test(key)||segment.length>=128)error(t('err.treeBroken'));
+        segment.push(key);const row=displayed.get(map[key].message?.id);
+        if(row){row.sourcePath=segment;segment=[];}
+      }
+    }
+    return {...result, title:data.title || 'ChatGPT', branch:selectedLeaf};
   }
-  async function loadConversation({id,share=false,leafId,fetch:request,signal,onProgress}) {
+  async function loadConversation({id,share=false,leafId,fetch:request,signal,onProgress,retainRaw=true,maxMessages=Infinity,sourcePaths=false}) {
     if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) error(t('err.openChat'));
     async function get(path, headers = {}) {
       signal?.throwIfAborted();
@@ -233,7 +244,7 @@
     if (legacy.ok) {
       data = await legacy.json();
       if (data.conversation_id && data.conversation_id !== id) error(t('err.otherChat'));
-      if (data.mapping) return {...parseTree(data,leafId),pages,source:'conversation-tree',raw:data};
+      if (data.mapping) return {...parseTree(data,leafId,{sourcePaths,maxMessages}),pages,source:'conversation-tree',...(retainRaw?{raw:data}:{})};
       error(t('err.chatFormat'));
     }
     if (legacy.status !== 404) error(t('err.chatFailed', legacy.status));
@@ -244,10 +255,11 @@
       if (!response.ok) error(t('err.historyFailed', response.status));
       data = await response.json();
       if (data.conversation_id && data.conversation_id !== id) error(t('err.otherChat'));
-      if (data.mapping && !cursor) return {...parseTree(data,leafId),pages,source:'conversation-tree',raw:data};
-      rawPages.unshift(data);
+      if (data.mapping && !cursor) return {...parseTree(data,leafId,{sourcePaths,maxMessages}),pages,source:'conversation-tree',...(retainRaw?{raw:data}:{})};
+      if(retainRaw)rawPages.unshift(data);
       if (!Array.isArray(data.messages) || !data.page_info) error(t('err.pageFormat'));
       title ||= data.title || 'ChatGPT';
+      if(collected.length+data.messages.length>maxMessages)error(t('err.pageFormat'));
       collected = [...data.messages.map(item => item.message || item),...collected];
       onProgress?.({pages,messages:collected.length});
       if (!data.page_info.has_previous_page) break;
@@ -264,7 +276,7 @@
       } else {byId.set(message.id,message);unique.push(message);}
     }
     if(unique.every(m=>Number.isFinite(m.create_time))) unique.sort((a,b)=>a.create_time-b.create_time);
-    return {...records(unique),title,pages,source:'paginated-conversation',raw:{pages:rawPages}};
+    return {...records(unique),title,pages,source:'paginated-conversation',...(retainRaw?{raw:{pages:rawPages}}:{})};
   }
   const extensionOf = type => ({'image/png':'png','image/jpeg':'jpg','image/webp':'webp','image/gif':'gif','image/svg+xml':'svg'})[String(type || '').split(';')[0].trim()] || 'bin';
   // Some file URLs answer without a content type (e.g. code-interpreter plots).

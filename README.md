@@ -4,6 +4,8 @@
 
 <h1 align="center">Chat &amp; Intelligent UI Exporter for ChatGPT</h1>
 
+此 Fork 另有独立构建的 [Chat Reader 浏览器插件（私有内测）](reader/README.md)。下文原导出器的安装和行为不变。
+
 <p align="center">
   Save ChatGPT conversations, including their interactive <b>Intelligent UI</b> cards,<br>
   as Markdown, HTML, PDF or straight into Obsidian. Everything happens on your computer.

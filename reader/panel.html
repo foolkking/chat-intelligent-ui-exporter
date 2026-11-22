@@ -1,0 +1,12 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Chat Reader</title><link rel="stylesheet" href="panel.css"><script defer src="config.js"></script><script defer src="client.js"></script><script defer src="panel.js"></script></head>
+<body><header><h1>Chat Reader</h1></header>
+<main><section id="pair"><p id="instance"></p><button id="connect" class="primary"></button></section>
+<section id="library" hidden>
+<details id="destination" open><summary id="destination-summary"></summary><form id="dest"><label for="target" id="target-label"></label><div class="line"><select id="target"></select><button id="choose"></button></div></form></details>
+<nav><button id="chats" aria-pressed="true"></button><button id="files" aria-pressed="false"></button></nav>
+<form id="search"><input id="q" type="search" maxlength="200"><button id="find"></button></form>
+<label for="filter" class="sr" id="filter-label"></label><select id="filter"></select>
+<p id="status" role="status"></p><section id="jobs" aria-live="polite"></section><ul id="rows"></ul><button id="more" hidden></button>
+<details id="settings"><summary id="settings-label"></summary><p id="identity"></p><button id="disconnect"></button></details></section>
+<p id="error" role="alert"></p></main></body></html>

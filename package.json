@@ -5,6 +5,8 @@
   "scripts": {
     "test": "node --test --test-force-exit tests/*.test.cjs",
     "package": "node scripts/package.cjs",
+    "package:reader": "node scripts/package-reader.cjs",
+    "test:reader": "node --test tests/reader-contract.test.cjs",
     "pdf-check": "node scripts/pdf-check.cjs",
     "panel-check": "node scripts/panel-check.cjs",
     "readme-shots": "node scripts/readme-shots.cjs"

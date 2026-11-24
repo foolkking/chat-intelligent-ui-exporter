@@ -1,9 +1,9 @@
 name: Reader private extension contract
 on:
   push:
-    paths: ['reader/**', 'extension/**', 'scripts/package-reader.cjs', 'tests/**', 'package*.json', '.github/workflows/reader-contract.yml']
+    paths: ['reader/**', 'extension/**', 'scripts/package-reader.cjs', 'scripts/verify-reader-distribution.cjs', 'tests/**', 'package*.json', '.github/workflows/reader-contract.yml']
   pull_request:
-    paths: ['reader/**', 'extension/**', 'scripts/package-reader.cjs', 'tests/**', 'package*.json', '.github/workflows/reader-contract.yml']
+    paths: ['reader/**', 'extension/**', 'scripts/package-reader.cjs', 'scripts/verify-reader-distribution.cjs', 'tests/**', 'package*.json', '.github/workflows/reader-contract.yml']
 permissions:
   contents: read
 jobs:
@@ -17,4 +17,37 @@ jobs:
         with: {node-version: '24'}
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm test
-      - run: node scripts/package-reader.cjs https://reader.example.test "$RUNNER_TEMP/reader-private-extension"
+      - name: Verify reproducible, unpackable ZIP with a synthetic origin
+        run: |
+          for run in first second; do
+            mkdir "$RUNNER_TEMP/$run"
+            node scripts/package-reader.cjs https://reader.example.test "$RUNNER_TEMP/$run/extension" --zip
+            (cd "$RUNNER_TEMP/$run" && sha256sum --check *.zip.sha256)
+          done
+          cmp "$RUNNER_TEMP"/first/*.zip "$RUNNER_TEMP"/second/*.zip
+      - name: Retain neutral reference checksum (not an installer or a deployment address)
+        if: ${{ github.event_name == 'push' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: reader-reference-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/first/*.zip.sha256
+          if-no-files-found: error
+      - name: Build and verify the configured installer (private repository only)
+        if: ${{ github.event_name == 'push' && github.event.repository.private == true && vars.READER_PUBLIC_ORIGIN != '' }}
+        env:
+          READER_ORIGIN: ${{ vars.READER_PUBLIC_ORIGIN }}
+        run: |
+          mkdir "$RUNNER_TEMP/reader-distribution"
+          node scripts/package-reader.cjs "$READER_ORIGIN" "$RUNNER_TEMP/reader-distribution/extension" --zip
+          (cd "$RUNNER_TEMP/reader-distribution" && sha256sum --check *.zip.sha256)
+          READER_DISTRIBUTION_ORIGIN="$READER_ORIGIN" node scripts/verify-reader-distribution.cjs \
+            "$RUNNER_TEMP"/reader-distribution/*.zip "$RUNNER_TEMP"/first/*.zip.sha256
+      - name: Publish verified extension and checksum for this exact commit
+        if: ${{ github.event_name == 'push' && github.event.repository.private == true && vars.READER_PUBLIC_ORIGIN != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: chat-reader-browser-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/reader-distribution/*.zip
+            ${{ runner.temp }}/reader-distribution/*.zip.sha256
+          if-no-files-found: error

@@ -1,154 +1,224 @@
-/* global READER_ORIGIN, ReaderClient */
-const $=id=>document.getElementById(id),zh=navigator.language.startsWith("zh"),loc=(c,e)=>zh?c:e;
+/* Native Reader client: catalog metadata only; the Reader webpage owns the document and its files. */
+const $=id=>document.getElementById(id), zh=navigator.language.startsWith("zh"), L=(cn,en)=>zh?cn:en,loc=L;
+const storage=chrome.storage.local, glyph=ReaderGlyph, uuid=s=>typeof s==="string"&&/^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(s);
+const node=(tag,cls,txt)=>{const x=document.createElement(tag);if(cls)x.className=cls;if(txt!=null)x.textContent=txt;return x;};
+const label=(el,copy)=>{el.title=copy;el.setAttribute("aria-label",copy);};
+const icon=(el,name,copy)=>{el.replaceChildren(glyph(name));label(el,copy);};
+const opt=(value,title)=>new Option(title,value);
+let device,projects=[],caps={},epoch=0,next=0,timer,composing=false,menuOwner,settingsOwner,historyOwner;
+const pendingRows=new Set();
+const setText=(id,cn,en)=>$(id).textContent=L(cn,en);
 document.documentElement.lang=zh?"zh-CN":"en";
-const txt=(id,cn,en)=>$(id).textContent=loc(cn,en);
-txt("connect","登录并连接 Reader","Connect to Reader");txt("settings-label","账号与设备","Account and device");
-txt("disconnect","断开此设备","Disconnect this device");txt("target-label","新对话保存到","Save new chats to");
-txt("choose","确认目标","Confirm destination");txt("chats","对话","Conversations");txt("files","文件","Files");
-txt("find","搜索","Search");txt("filter-label","浏览范围","Browse scope");txt("more","加载更多","Load more");
-$("q").placeholder=loc("搜索 Reader 资料","Search Reader");$("q").setAttribute("aria-label",$("q").placeholder);
-$("instance").textContent=READER_ORIGIN;const storage=chrome.storage.local;
-const btn=(label,action,cls="")=>{const b=document.createElement("button");b.type="button";b.textContent=label;b.className=cls;b.onclick=()=>run(b,action);return b;};
-function link(title,cid,aid){if(!uuid(cid)||aid&&!uuid(aid))throw Error("Invalid Reader link");const a=document.createElement("a");a.textContent=title;
-  a.href=READER_ORIGIN+"/conversations/"+cid+(aid?"?files=open&attachmentId="+aid:"");a.target="_blank";a.rel="noopener noreferrer";return a;}
-const uuid=s=>typeof s==="string"&&/^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(s);
-const option=(v,label)=>new Option(label,v);
-let device,projects=[],mode="chats",offset=0,epoch=0,jobsKey="",lastFilter="";
-const session=async()=>{const v=(await storage.get("device")).device;if(!device||v?.id!==device.id)throw Error(loc("账号已改变，请重新打开侧栏。","Account changed; reopen the panel."));return v;};
-async function req(p,opts){await session();return ReaderClient.request(device.id,p,opts);}
-const json=async(p,opts)=>(await req(p,opts)).json();
-async function run(b,fn){if(b.disabled)return;b.disabled=true;$("error").textContent="";try{await fn();}catch(e){$("error").textContent=e.message;}finally{b.disabled=false;}}
-const wake=async()=>{const r=await chrome.runtime.sendMessage({kind:"wake"});if(!r?.ok)throw Error("Reader transfer unavailable");};
-const cmd=async(fields)=>{await session();await wake();const r=await chrome.runtime.sendMessage({kind:"panel-host",device:device.id,...fields});if(!r?.ok)throw Error(r?.error||"Reader task unavailable");};
-async function startExport(cid){
-  return navigator.locks.request("reader-export-request",async()=>{
-  const saved=(await storage.get("exportJob")).exportJob;
-  if(saved?.device===device.id&&saved.cid!==cid&&!saved.aid)throw Error(loc("请先完成当前上下文导出。","Finish the current export first."));
-  const key=saved?.device===device.id&&saved.cid===cid&&!saved.aid?saved.key:crypto.randomUUID(),owner=device.id;
-  await storage.set({exportJob:{cid,key,device:owner}}); // Recover after close or a lost POST using exactly this key.
-  const job=await json(`conversations/${cid}/context`,{method:"POST",headers:{"Idempotency-Key":key}});
-  await session();await storage.set({exportJob:{cid,key,device:owner,id:job.id}});await renderJobs();
-  });
+document.querySelectorAll("[data-glyph]").forEach(x=>x.append(glyph(x.dataset.glyph)));
+icon($("settings-label"),"settings",L("设置","Settings"));icon($("find"),"search",L("搜索","Search"));
+document.querySelectorAll(".dismiss").forEach(b=>{icon(b,"close",L("关闭","Close"));b.onclick=()=>b.closest("dialog").close();});
+setText("connect","登录并连接 Reader","Connect to Reader");setText("settings-heading","设置","Settings");
+setText("history-heading","最近任务","Recent tasks");setText("history-link","最近任务","Recent tasks");
+setText("disconnect","断开此设备","Disconnect this device");setText("target-label","新对话保存到","Save new conversations to");
+setText("share-label-copy","在 ChatGPT 页内显示此项目名称","Show this project name on the ChatGPT page");
+setText("source-lookup-copy","打开 ChatGPT 对话时，将当前对话标识发给 Reader 以查找已存版本","When I open a ChatGPT chat, send its ID to Reader to find a saved version");
+setText("choose","确认","Confirm");setText("destination-needed","选择新对话的保存位置","Choose where new conversations are saved");
+setText("boot-retry","重新读取资料","Retry loading library");
+setText("more","加载更多","Load more");$("instance").textContent=READER_ORIGIN;
+$("q").placeholder=L("搜索对话…","Search conversations…");$("q").setAttribute("aria-label",$("q").placeholder);
+$("view").setAttribute("aria-label",L("对话视图","Conversation view"));$("filter").setAttribute("aria-label",L("项目筛选","Project filter"));
+$("jobs").setAttribute("aria-label",L("任务状态","Task status"));$("row-menu").setAttribute("aria-label",L("对话操作","Conversation actions"));
+const announce=message=>{$("announcer").textContent=message;};
+function problem(e){
+  if(e.status===401)return L("Reader 授权已失效。请在设置中断开并重新连接。","Reader authorization expired. Disconnect in Settings and reconnect.");
+  if(e.status===403)return L("Reader 未允许此操作。请核对账号和实例策略。","Reader did not allow this action. Check the account and instance policy.");
+  if(e.status===404)return L("Reader 未提供此功能，或资料已不可用。请在 Reader 中核对。","This feature or item is unavailable. Check it in Reader.");
+  if(e.status===409)return L("状态或预设已改变。请在 Reader 中核对后重试。","The state or preset changed. Review it in Reader before retrying.");
+  if(e.status>=500)return L("Reader 暂时不可用，请稍后重试。","Reader is temporarily unavailable. Try again in a moment.");
+  if(e instanceof TypeError)return L("连接不到 Reader。请核对网络和实例地址后重试。","Cannot reach Reader. Check your network and instance address.");
+  return e.message||L("操作未完成，请重试。","Action not completed. Try again.");
 }
-async function download(aid){await cmd({op:"download",aid});}
-async function renderJobs(){
-  const {jobs=[],exportJob}=await storage.get(["jobs","exportJob"]);
-  if(!device)return;
-  const list=jobs.filter(j=>j.device===device.id).reverse(),ex=exportJob?.device===device.id?exportJob:null;
-  const sig=JSON.stringify([list,ex,zh]);if(sig===jobsKey)return;jobsKey=sig;
-  const div=$("jobs"),wasOpen=div.querySelector("details")?.open;div.replaceChildren();
-  const history=document.createElement("details");history.open=!!wasOpen;const summary=document.createElement("summary");
-  summary.textContent=loc(`其他导入任务（${list.length-1}）`,`Other imports (${list.length-1})`);history.append(summary);
-  const phases={reading:["正在读取当前对话","Reading the selected conversation"],"capture-interrupted":["读取中断，未发送。请重新打开原对话并保存。","Capture interrupted; nothing was sent. Reopen the source and save again."],
-    "storage-full":["浏览器临时空间不足，未发送。释放空间后从原对话重试。","Not enough temporary browser space. Nothing was sent. Free space and retry from the source."],
-    uploading:["正在上传","Uploading"],received:["已接收，等待处理","Received; waiting"],processing:["正在处理","Processing"],
-    queued:["正在写入 Reader","Saving in Reader"],"resource-wait":["已接收，等待可用内存","Waiting for memory"],done:["已存入 Reader","Saved to Reader"],
-    review:["保存前需确认","Review before saving"],attention:["需要在 Reader 检查导入任务","Review the import in Reader"],
-    reconnect:["授权失效，请重新连接","Authorization expired; reconnect"],"upload-rejected":["上传被拒绝，未导入","Upload rejected; not imported"],
-    "upload-unknown":["上传结果未知，请先检查回执","Upload uncertain; check receipt first"],check:["状态未确认","Status unknown"]};
-  for(const j of list){
-    const box=document.createElement("div");box.className="job";const p=document.createElement("p");
-    p.textContent=loc(...(phases[j.phase]||["等待处理","Pending"]));box.append(p);
-    if(j.cid){box.append(link(j.title||loc("阅读已保存的对话","Read saved conversation"),j.cid),btn(loc("导出上下文","Export context"),()=>startExport(j.cid)));}
-    else if(j.review){
-      const r=j.review,info=document.createElement("p");info.textContent=[
-        r.partial?loc(`未完整保留：文件提示 ${j.losses?.files||0}、交互 ${j.losses?.interactions||0}、外链 ${j.losses?.links||0}。可返回原对话重新保存，或只保存可用内容。`,`Not fully preserved: file warnings ${j.losses?.files||0}, interactions ${j.losses?.interactions||0}, links ${j.losses?.links||0}. Retry from the source or save available content.`):"",
-        r.live_share?loc("追加的内容将对现有整条实时分享的读者可见。","Existing live-share readers will see the appended messages."):"",
-        r.action==="conflict"?loc("分支或本地内容已改变；原对话不会被覆盖。","The branch or local content changed; the original will not be overwritten."):""].filter(Boolean).join(" ");
-      box.append(info);
-      if(r.conversation_id)box.append(link(loc("已有对话","Existing conversation"),r.conversation_id));
-      box.append(btn(r.action==="conflict"?loc("另存一份","Save separate copy"):loc("确认保存","Confirm save"),
-        ()=>cmd({op:"check",key:j.key,decision:{receipt:r.receipt,accept_partial:r.partial,accept_share:r.live_share,separate:r.action==="conflict"}})));
-    }else if(!j.active&&!["upload-rejected","capture-interrupted","storage-full"].includes(j.phase))box.append(btn(loc("检查状态","Check status"),()=>cmd({op:"check",key:j.key})));
-    (j===list[0]?div:history).append(box);
+function showError(e){
+  const d=document.querySelector("dialog[open]");let out=$("error");
+  if(d){out=d.querySelector(".dialog-error");if(!out){out=node("p","dialog-error");out.setAttribute("role","alert");d.append(out);}}
+  out.textContent=problem(e);
+}
+async function run(b,fn){
+  if(b.dataset.pending||b.disabled)return;b.dataset.pending="1";b.setAttribute("aria-busy","true");
+  $("error").textContent="";document.querySelectorAll(".dialog-error").forEach(x=>x.textContent="");
+  try{await fn();}catch(e){showError(e);}finally{delete b.dataset.pending;b.removeAttribute("aria-busy");}
+}
+function btn(copy,fn,cls=""){const b=node("button",cls,copy);b.type="button";b.onclick=()=>run(b,fn);return b;}
+function link(title,cid,aid=null,files=false){
+  if(!uuid(cid)||aid&&!uuid(aid))throw Error("Invalid Reader target");
+  const a=node("a","",title);a.href=READER_ORIGIN+"/conversations/"+cid+(files?"?files=open"+(aid?"&attachmentId="+aid:""):"");
+  a.target="_blank";a.rel="noopener noreferrer";return a;
+}
+async function session(){const {device:d}=await storage.get("device");if(!device||d?.id!==device.id||d.origin!==READER_ORIGIN)throw Error(L("账号已改变，请重开侧栏。","Account changed. Reopen the side panel."));}
+async function req(path,opts){await session();return ReaderClient.request(device.id,path,opts);}
+const json=async(path,opts)=>(await req(path,opts)).json();
+const cmd=async fields=>{await session();const w=await chrome.runtime.sendMessage({kind:"wake"});if(!w?.ok)throw Error("Reader transfer unavailable");
+  const r=await chrome.runtime.sendMessage({kind:"panel-host",device:device.id,...fields});if(!r?.ok)throw Error(r?.error||"Reader task unavailable");};
+function dateLabel(value){
+  if(!value)return null;
+  const d=new Date(/T/.test(value)&&!/(Z|[+-]\d\d:\d\d)$/i.test(value)?value+"Z":value);if(isNaN(+d))return null;
+  const now=new Date(),prev=new Date(now);prev.setDate(prev.getDate()-1);
+  const text=d.toDateString()===now.toDateString()?L("今天","Today"):d.toDateString()===prev.toDateString()?L("昨天","Yesterday"):
+    new Intl.DateTimeFormat(zh?"zh-CN":"en",{...(now.getFullYear()!==d.getFullYear()?{year:"numeric"}:{}),month:"short",day:"numeric"}).format(d);
+  const t=node("time","",text);t.dateTime=d.toISOString();t.title=d.toLocaleString();return t;
+}
+const projectName=s=>s?.state==="unclassified"?L("未归类","Unclassified"):s?.state==="project"?s.name:L("项目不可用","Project unavailable");
+const pOptions=(f,all)=>{f.replaceChildren(...(all?[opt("",L("所有项目","All projects")),opt("unclassified",L("未归类","Unclassified"))]:[opt("",L("未归类","Unclassified"))]),
+  ...projects.filter(p=>!p.default).map(p=>opt(p.id,p.name)));};
+function focus(el){if(el?.isConnected&&!el.hidden)el.focus({preventScroll:true});}
+function closeMenu(restore=false){const m=$("row-menu");if(m.matches(":popover-open"))m.hidePopover();menuOwner?.setAttribute("aria-expanded","false");if(restore)focus(menuOwner);}
+function positionMenu(){
+  const m=$("row-menu");if(!m.matches(":popover-open")||!menuOwner?.isConnected)return;
+  const r=menuOwner.getBoundingClientRect(),box=m.getBoundingClientRect();
+  m.style.left=Math.max(8,Math.min(innerWidth-box.width-8,r.right-box.width))+"px";
+  m.style.top=Math.max(8,Math.min(innerHeight-box.height-8,r.bottom+box.height+8<=innerHeight?r.bottom:r.top-box.height))+"px";
+}
+async function refreshRow(cid,notice){
+  const ownsFocus=notice.contains(document.activeElement);
+  await load(true);
+  if(ownsFocus&&document.activeElement===document.body)
+    focus(document.querySelector(`[data-cid="${cid}"] .row-more`)||$("q"));
+}
+function menuRow(text,ico,fn){const b=btn(text,fn);b.prepend(glyph(ico));return b;}
+function rowPending(b){
+  b.disabled=true;b.setAttribute("aria-busy","true");
+  const n=node("p","row-notice",L("正在更新…","Updating…"));n.tabIndex=-1;n.setAttribute("role","status");
+  b.closest("li").append(n);return n;
+}
+async function mutateRow(item,trigger,fn){
+  const cid=item.id;if(pendingRows.has(cid))return;
+  pendingRows.add(cid);closeMenu();focus(rowPending(trigger));
+  let failure;try{await fn();}catch(e){failure=e;}finally{pendingRows.delete(cid);}
+  const notice=document.querySelector(`[data-cid="${cid}"] .row-notice`);
+  if(!failure){if(notice)await refreshRow(cid,notice);return;}
+  const text=failure.status>=500||failure instanceof TypeError?
+    L("操作结果尚未确认。请重新读取列表核对。","The result is unconfirmed. Reload the list to check."):problem(failure);
+  if(!notice){$("error").textContent=text;return;}
+  notice.closest("li").querySelector(".row-more").removeAttribute("aria-busy");
+  notice.classList.add("failed");notice.setAttribute("role","alert");notice.textContent=text;
+  // An HTTP or network failure is not proof of a failed write. The only retry
+  // offered here reads the authoritative catalog; it never repeats the mutation.
+  notice.append(btn(L("重新读取列表","Reload list"),()=>refreshRow(cid,notice),"text-action"));
+}
+function openMenu(item,b){
+  if(b.disabled||pendingRows.has(item.id))return;
+  const m=$("row-menu");if(m.matches(":popover-open")&&menuOwner===b){closeMenu(true);return;}
+  closeMenu();menuOwner=b;m.replaceChildren();b.setAttribute("aria-expanded","true");
+  const cid=item.id,pid=uuid($("filter").value)?$("filter").value:null;
+  const exp=menuRow(L("导出上下文 .context.zip","Export context .context.zip"),"download",()=>{closeMenu(true);return startExport(cid);});
+  m.append(exp);const note=node("small","menu-note");m.append(note);
+  if(caps.save_receipts)json("context/options").then(s=>{if(note.isConnected){note.textContent=policyText(s);positionMenu();}}).catch(()=>{});
+  if(typeof item.pinned==="boolean"){
+    const text=pid?(item.pinned?L("取消项目置顶","Unpin in project"):L("项目置顶","Pin in project")):(item.pinned?L("取消全局置顶","Unpin globally"):L("全局置顶","Pin globally"));
+    m.append(menuRow(text,"pin",()=>mutateRow(item,b,()=>req(`conversations/${cid}/pin`+(pid?"?project_id="+pid:""),ReaderClient.json("PATCH",{is_pinned:!item.pinned})))));
   }
-  if(list.length>1)div.append(history);
-  if(ex){
-    const box=document.createElement("div");box.className="job";
-    box.append(document.createTextNode(ex.aid?loc("上下文包已生成 ","Context package ready "):loc("正在生成上下文包 ","Preparing context package ")));
-    if(ex.aid)box.append(btn(loc("下载 .context.zip","Download .context.zip"),()=>download(ex.aid)));
-    else if(!ex.id)box.append(btn(loc("核对导出请求","Recover export request"),()=>startExport(ex.cid)));
-    box.append(btn(loc("收起","Dismiss"),()=>storage.remove("exportJob"),"quiet"));div.append(box);
+  m.append(menuRow(L("移到项目…","Move to project…"),"folder",()=>{
+    const sel=node("select");label(sel,L("移到项目","Move to project"));pOptions(sel,false);if(item.project_id)sel.value=item.project_id;
+    m.replaceChildren(menuRow(L("返回","Back"),"back",()=>{closeMenu();openMenu(item,b);}),sel,
+      menuRow(L("移动","Move"),"folder",()=>mutateRow(item,b,()=>req(`conversations/${cid}/project`,ReaderClient.json("PUT",{project_id:sel.value||null})))));
+    positionMenu();focus(sel);
+  }));
+  if(item.attachment_count>0||item.match_kind==="attachment"){
+    const a=link(L("在 Reader 查看附件","View files in Reader"),cid,item.match_attachment_id,true);a.prepend(glyph("file"));a.onclick=()=>closeMenu(true);m.append(a);
   }
+  m.showPopover();positionMenu();focus(exp);
 }
-let exportPolling=false;
-async function pollExport(){
-  if(!device||exportPolling)return;exportPolling=true;
-  try{const {exportJob:j}=await storage.get("exportJob");if(!j?.id||j.aid||j.device!==device.id)return;
-    const s=await json("exports/"+j.id);await session();
-    if((await storage.get("exportJob")).exportJob?.id!==j.id)return;
-    if(s.status==="committed"&&s.artifact_id){await navigator.locks.request("reader-export-request",async()=>{
-      const latest=(await storage.get("exportJob")).exportJob;
-      if(latest?.id!==j.id||latest.aid)return;
-      await session();await storage.set({exportJob:{...j,aid:s.artifact_id}});await download(s.artifact_id);
-    });}
-    else if(["failed","canceled","cancelled"].includes(s.status)){await storage.remove("exportJob");throw Error(loc("导出未完成，可以重试。","Export failed; retry."));}
-  }catch(e){$("error").textContent=e.message;}finally{exportPolling=false;}
-}
+$("row-menu").addEventListener("toggle",()=>{if(menuOwner&&!$("row-menu").matches(":popover-open"))menuOwner.setAttribute("aria-expanded","false");});
+$("row-menu").onkeydown=e=>{if(e.key==="Escape"){e.preventDefault();closeMenu(true);} };
+addEventListener("resize",positionMenu);addEventListener("scroll",positionMenu,{capture:true,passive:true});
 function row(item){
-  const li=document.createElement("li"),r=document.createElement("div");r.className="row";li.append(r);
-  const file=mode==="files",cid=file?item.conversation_id:item.id;
-  const a=link(file?item.name:item.title,cid,file?item.id:null);a.className="row-title";r.append(a);
-  if(!file)r.append(btn(loc("导出上下文","Export context"),()=>startExport(cid),"quiet"));
-  const act=document.createElement("div");act.className="actions";act.hidden=true;
-  const more=btn(loc("更多","More"),()=>{act.hidden=!act.hidden;more.setAttribute("aria-expanded",String(!act.hidden));},"quiet");
-  more.setAttribute("aria-expanded","false");r.append(more);
-  if(file){
-    const meta=document.createElement("small");meta.textContent=[item.conversation_title,item.mime,item.bytes==null?"":`${(item.bytes/1024).toFixed(1)} KiB`].filter(Boolean).join(" · ");li.append(meta);
-    const field=document.createElement("input");field.value=item.name;field.maxLength=500;field.setAttribute("aria-label",loc("文件显示名","Display name"));
-    act.append(field,btn(loc("保存名称","Save name"),async()=>{await req(`conversations/${cid}/files/${item.id}`,ReaderClient.json("PATCH",{display_name:field.value}));await load(true);}));
-  }else{
-    const target=document.createElement("select");target.setAttribute("aria-label",loc("移到项目","Move to project"));
-    target.append(option("",loc("未归类","Unclassified")),...projects.filter(p=>!p.default).map(p=>option(p.id,p.name)));
-    if(item.project_id)target.value=item.project_id;
-    act.append(target,btn(loc("移动","Move"),async()=>{await req(`conversations/${cid}/project`,ReaderClient.json("PUT",{project_id:target.value||null}));await load(true);}));
-    if(typeof item.pinned==="boolean"){
-      const project=uuid($("filter").value)?$("filter").value:null;
-      const label=project?(item.pinned?loc("取消项目置顶","Unpin in project"):loc("项目置顶","Pin in project")):
-        (item.pinned?loc("取消全局置顶","Unpin globally"):loc("全局置顶","Pin globally"));
-      act.append(btn(label,async()=>{
-        await req(`conversations/${cid}/pin`+(project?"?project_id="+project:""),ReaderClient.json("PATCH",{is_pinned:!item.pinned}));await load(true);}));
-    }
-  }
-  li.append(act);return li;
+  const li=node("li");li.dataset.cid=item.id;const a=link(null,item.id),copy=node("span","copy"),meta=node("span","meta");
+  a.className="row-title";const lead=glyph(item.pinned?"pin":"chat");lead.classList.add("lead");if(item.pinned)lead.classList.add("pinned");
+  const title=item.title||L("无标题对话","Untitled conversation"),name=node("span","name");
+  name.append(lead,title);if(item.pinned)name.append(node("span","sr",L("（已置顶）"," (pinned)")));copy.append(name,meta);
+  const pname=item.project_unavailable?L("项目不可用","Project unavailable"):item.project_name||projects.find(p=>p.id===item.project_id)?.name||L("未归类","Unclassified");
+  const p=node("span","project",pname);p.title=pname;meta.append(p);
+  const t=dateLabel(item.date);if(t){const dot=node("span","sep","·");dot.setAttribute("aria-hidden","true");meta.append(dot,t);t.title=(item.date_kind==="opened"?L("最近打开：","Last opened: "):item.date_kind==="imported"?L("导入：","Imported: "):L("更新：","Updated: "))+t.title;}
+  if(item.attachment_count>0){const clip=node("span","clip");clip.append(glyph("file"),String(item.attachment_count));label(clip,L(`${item.attachment_count} 个附件`,`${item.attachment_count} attachments`));meta.append(clip);}
+  if(item.attachment_match||item.match_kind==="attachment")meta.append(node("span","hit",L("附件匹配","File match")));
+  a.append(copy);const b=node("button","icon row-more");icon(b,"more",L("更多：","More: ")+title);b.setAttribute("aria-expanded","false");b.setAttribute("aria-controls","row-menu");b.onclick=()=>openMenu(item,b);li.append(a,b);if(pendingRows.has(item.id))rowPending(b);return li;
+}
+function emptyActions(q,filter,view){
+  const actions=$("recover"),pinned=view==="pinned";
+  const change=(copy,el,value)=>actions.append(btn(copy,()=>{
+    el.value=value;focus(q?$("q"):el);return load(true);
+  },"text-action"));
+  if(pinned)change(L("包含未置顶对话","Include unpinned conversations"),$("view"),"recent");
+  if(filter)change(pinned?L("查看全局置顶","View globally pinned"):q?L("搜索所有项目","Search all projects"):L("查看所有项目","View all projects"),$("filter"),"");
+  if(q&&!filter&&!pinned)change(L("清空搜索","Clear search"),$("q"),"");
 }
 async function load(reset){
-  const n=++epoch;if(reset){offset=0;$("rows").replaceChildren();}
-  $("more").hidden=true;$("status").textContent=loc("正在读取…","Loading…");
-  const params=new URLSearchParams({offset:String(offset)}),q=$("q").value.trim(),filter=$("filter").value;
-  if(q)params.set("q",q);if(uuid(filter))params.set("project_id",filter);
-  if(filter==="unclassified"&&mode==="chats")params.set("scope",filter);
-  const s=await json((mode==="chats"?"conversations":"files")+"?"+params);
-  if(n!==epoch)return;$("rows").append(...s.items.map(row));offset+=s.items.length;$("more").hidden=!s.has_more;
-  $("status").textContent=!offset?loc("没有匹配结果。","No results."):"";
+  if($("library").hidden)return;
+  clearTimeout(timer);const n=++epoch,q=$("q").value.trim(),filter=$("filter").value,view=$("view").value||"library",params=new URLSearchParams({offset:String(reset?0:next)});
+  if(caps.catalog_details)params.set("view",view);if(q)params.set("q",q);if(uuid(filter))params.set("project_id",filter);else if(filter==="unclassified")params.set("scope",filter);
+  if(reset){closeMenu();$("rows").replaceChildren();next=0;}$("more").hidden=true;$("recover").replaceChildren();$("rows").setAttribute("aria-busy","true");$("status").textContent=L("正在读取…","Loading…");
+  try{const s=await json("conversations?"+params);if(n!==epoch)return;await session();if(n!==epoch)return;
+    const first=$("view").options[0];first.textContent=q?L("搜索结果","Search results"):!caps.catalog_details?L("对话","Conversations"):s.listing==="updated"?L("最近更新","Recently updated"):L("最近的对话","Recent conversations");
+    $("rows").append(...s.items.map(row));next+=s.items.length;$("more").hidden=!s.has_more;
+    $("status").textContent=next?"":q?L("没有匹配的对话。","No matching conversations."):view==="pinned"?L("此范围内没有置顶对话。","No pinned conversations in this scope."):L("此处还没有对话。","No conversations here yet.");
+    if(!next)emptyActions(q,filter,view);
+  }catch(e){if(n!==epoch)return;$("status").textContent=problem(e);$("recover").append(btn(L("重试","Retry"),()=>load(reset),"text-action"));}
+  finally{if(n===epoch)$("rows").removeAttribute("aria-busy");}
 }
-function filters(){
-  const f=$("filter");f.replaceChildren(option("",loc("全部项目","All projects")));
-  if(mode==="chats")f.append(option("unclassified",loc("未归类","Unclassified")));
-  f.append(...projects.filter(p=>!p.default).map(p=>option(p.id,p.name)));if([...f.options].some(o=>o.value===lastFilter))f.value=lastFilter;
+function settings(b){settingsOwner=b;if(!$("settings").open)$("settings").showModal();focus(!$("dest").hidden&&!$("target").disabled?$("target"):$("history-link"));}
+$("settings-label").onclick=()=>settings($("settings-label"));$("destination-needed").onclick=()=>settings($("destination-needed"));
+function restoreDialogOwner(dialog,opener){
+  // Native close may already have restored the opener. A queued `close` must
+  // not move focus back from the user's next control, including another dialog.
+  if(!dialog.open&&(document.activeElement===document.body||dialog.contains(document.activeElement)))focus(opener);
 }
-async function init(){
-  await ReaderClient.trust;({device}=await storage.get("device"));$("pair").hidden=!!device;$("library").hidden=!device;
-  if(!device)return;
-  $("identity").textContent=device.name+" · "+READER_ORIGIN;projects=await json("projects");filters();
-  const t=$("target");t.replaceChildren(option("",loc("未归类","Unclassified")),...projects.filter(p=>!p.default).map(p=>option(p.id,p.name)));
-  $("destination-summary").textContent=loc("设置导入目标","Set import destination");
-  const {destination}=await storage.get("destination");if(destination?.device===device.id&&[...t.options].some(o=>o.value===(destination.project||""))){
-    t.value=destination.project||"";$("choose").disabled=true;showDestination();
-  }else if(destination){await storage.remove("destination");}
-  $("target").onchange=()=>{$("choose").disabled=false;};
+$("settings").onclose=()=>restoreDialogOwner($("settings"),settingsOwner?.hidden?$("settings-label"):settingsOwner);
+$("history-link").onclick=async()=>{historyOwner=$("history-link");await renderJobs(true);$("history").showModal();};
+$("history").onclose=()=>restoreDialogOwner($("history"),historyOwner?.isConnected?historyOwner:$("settings-label"));
+async function init(retry=false){
+  // A registered device can still be disconnected while its catalog is
+  // unavailable. Never offer an empty project picker as a writable destination.
+  const retryButton=$("boot-retry");
+  try{
+  await ReaderClient.trust;({device}=await storage.get("device"));$("pair").hidden=!!device;$("settings-label").hidden=!device;
+  $("boot").hidden=!device;$("library").hidden=$("dest").hidden=$("choose").disabled=true;if(!device)return;
+  $("identity").textContent=device.name+" · "+READER_ORIGIN;
+  $("boot-status").textContent=L("正在读取资料…","Loading library…");
+  const available=await json("capabilities"),scopes=await json("projects");await session();
+  caps=available;projects=scopes;pOptions($("filter"),true);pOptions($("target"),false);
+  $("view").replaceChildren(opt(caps.catalog_details?"recent":"library",caps.catalog_details?L("最近的对话","Recent conversations"):L("对话","Conversations")));
+  if(caps.catalog_details)$("view").append(opt("pinned",L("已置顶","Pinned")));
+  const {destination:d,sourceLookupDevice}=await storage.get(["destination","sourceLookupDevice"]);const valid=d?.device===device.id&&[...$("target").options].some(o=>o.value===(d.project||""));
+  $("source-lookup-setting").hidden=caps.source_lookup!==true;$("source-lookup").checked=sourceLookupDevice===device.id;
+  if(valid){$("target").value=d.project||"";$("share-label").checked=!!d.showName;}else if(d)await storage.remove("destination");
+  $("destination-needed").hidden=valid||!caps.capture;
+  if(!caps.capture)$("target-label").textContent=L("此实例未启用网页保存。资料浏览和导出仍可用。","Web capture is unavailable. Browsing and export are still available.");
+  $("choose").disabled=$("target").disabled=!caps.capture;
+  const returnToSearch=retry&&(document.activeElement===retryButton||document.activeElement===document.body);
+  $("dest").hidden=$("library").hidden=false;$("boot").hidden=retryButton.hidden=true;
+  if(!valid&&caps.capture)settings($("settings-label"));else if(returnToSearch)focus($("q"));
   await renderJobs();await load(true);
+  }catch(e){
+    $("library").hidden=$("dest").hidden=$("choose").disabled=true;
+    $("boot").hidden=retryButton.hidden=false;$("boot-status").textContent=e.status===404?
+      L("此 Reader 未提供插件资料接口。请核对服务器版本和实例策略。","The extension catalog is unavailable on this Reader. Check the server version and its policy."):problem(e);
+    $("pair").hidden=true;if(!device)$("settings-label").hidden=true;
+  }
 }
-function showDestination(){
-  $("destination-summary").textContent=loc("保存到：","Save to: ")+$("target").selectedOptions[0].text;
-  $("destination").open=false;
-}
-$("connect").onclick=()=>run($("connect"),async()=>{await ReaderClient.connect();await init();});
+$("boot-retry").onclick=()=>run($("boot-retry"),()=>init(true));
+$("source-lookup").onchange=async e=>{
+  const box=e.currentTarget,enabled=box.checked,id=device?.id;box.disabled=true;
+  try{
+    await navigator.locks.request("reader-device",async()=>{
+      await session();if(device.id!==id||caps.source_lookup!==true)throw Error(L("请重开侧栏。","Reopen the side panel."));
+      if(enabled)await storage.set({sourceLookupDevice:id});else await storage.remove("sourceLookupDevice");
+    });
+  }catch(e){box.checked=!enabled;showError(e);}finally{box.disabled=false;}
+};
+$("dest").onsubmit=e=>{e.preventDefault();run($("choose"),async()=>{await session();const project=$("target").value||null;
+  await storage.set({destination:{device:device.id,project,showName:$("share-label").checked,name:$("target").selectedOptions[0].text}});
+  $("destination-needed").hidden=true;$("settings").close();announce(L("保存位置已更新。","Save destination updated."));});};
+$("connect").onclick=()=>run($("connect"),async()=>{try{await ReaderClient.connect();}catch(e){if(!e.status&&!/cancel|canceled|取消/i.test(e.message))throw Error(L("无法完成授权。请核对 Reader 地址、支持插件的版本及设备开关。","Authorization did not complete. Check the Reader address, extension support and device policy."));throw e;}await init();});
 $("disconnect").onclick=()=>run($("disconnect"),async()=>{await ReaderClient.disconnect();location.reload();});
-$("dest").onsubmit=e=>{e.preventDefault();const b=$("choose");run(b,async()=>{await session();await storage.set({destination:{device:device.id,project:$("target").value||null}});showDestination();$("status").textContent=loc("目标已保存。","Destination saved.");});};
-$("search").onsubmit=e=>{e.preventDefault();filters();run($("find"),()=>load(true));};
-$("filter").onchange=()=>{lastFilter=$("filter").value;run($("find"),()=>load(true));};
-for(const m of ["chats","files"])$(m).onclick=()=>run($(m),async()=>{mode=m;for(const x of ["chats","files"])$(x).setAttribute("aria-pressed",String(x===m));filters();await load(true);});
-$("more").onclick=()=>run($("more"),()=>load(false));
-chrome.storage.onChanged.addListener((c,area)=>{if(area!=="local")return;if(c.device&&device&&c.device.newValue?.id!==device.id){location.reload();return;}if(c.jobs||c.exportJob)renderJobs().catch(e=>{$("error").textContent=e.message;});});
-init().catch(e=>{$("error").textContent=e.message;});setInterval(pollExport,1600);
+$("q").oncompositionstart=()=>{composing=true;clearTimeout(timer);};$("q").oncompositionend=()=>{composing=false;schedule();};
+function schedule(){if(composing)return;clearTimeout(timer);epoch++;timer=setTimeout(()=>load(true),180);}
+$("q").oninput=schedule;$("search").onsubmit=e=>{e.preventDefault();if(!composing)load(true);};
+$("filter").onchange=$("view").onchange=()=>load(true);$("more").onclick=()=>run($("more"),()=>load(false));
+chrome.storage.onChanged.addListener((c,area)=>{if(area!=="local")return;if(c.device&&device&&c.device.newValue?.id!==device.id){location.reload();return;}
+  if(c.jobs||c.exportJob||c.seenWarnings)renderJobs().catch(showError);});
+init().catch(showError);setInterval(pollExport,1600);

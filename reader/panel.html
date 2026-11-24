@@ -1,12 +1,33 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Chat Reader</title><link rel="stylesheet" href="panel.css"><script defer src="config.js"></script><script defer src="client.js"></script><script defer src="panel.js"></script></head>
-<body><header><h1>Chat Reader</h1></header>
-<main><section id="pair"><p id="instance"></p><button id="connect" class="primary"></button></section>
-<section id="library" hidden>
-<details id="destination" open><summary id="destination-summary"></summary><form id="dest"><label for="target" id="target-label"></label><div class="line"><select id="target"></select><button id="choose"></button></div></form></details>
-<nav><button id="chats" aria-pressed="true"></button><button id="files" aria-pressed="false"></button></nav>
-<form id="search"><input id="q" type="search" maxlength="200"><button id="find"></button></form>
-<label for="filter" class="sr" id="filter-label"></label><select id="filter"></select>
-<p id="status" role="status"></p><section id="jobs" aria-live="polite"></section><ul id="rows"></ul><button id="more" hidden></button>
-<details id="settings"><summary id="settings-label"></summary><p id="identity"></p><button id="disconnect"></button></details></section>
-<p id="error" role="alert"></p></main></body></html>
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Chat Reader</title><link rel="stylesheet" href="panel.css">
+<script defer src="config.js"></script><script defer src="client.js"></script><script defer src="glyphs.js"></script>
+<script defer src="panel-export.js"></script><script defer src="panel-jobs.js"></script><script defer src="panel.js"></script></head>
+<body>
+<header class="mast"><h1><span data-glyph="book"></span>Chat Reader</h1><button id="settings-label" class="icon" hidden></button></header>
+<main>
+  <section id="pair" hidden><p id="instance"></p><button id="connect" class="primary"></button></section>
+  <section id="boot" hidden><p id="boot-status" role="status"></p><button id="boot-retry" type="button" class="text-action" hidden></button></section>
+  <section id="library" hidden>
+    <form id="search" role="search"><input id="q" type="search" maxlength="200" autocomplete="off"><button id="find" class="icon" type="submit"></button></form>
+    <div class="tools"><label class="select-wrap view"><select id="view"></select><span data-glyph="chevron"></span></label>
+      <label class="select-wrap scope"><select id="filter"></select><span data-glyph="chevron"></span></label></div>
+    <button id="destination-needed" class="notice" hidden></button>
+    <section id="jobs" aria-label="Tasks"></section>
+    <p id="status" role="status"></p><div id="recover" class="recovery-actions"></div>
+    <ul id="rows"></ul><button id="more" class="more-page" hidden></button>
+  </section>
+  <p id="error" role="alert"></p>
+</main>
+<dialog id="settings" aria-labelledby="settings-heading">
+  <header><h2 id="settings-heading"></h2><button class="icon dismiss"></button></header>
+  <p id="identity"></p>
+  <form id="dest" hidden><label for="target" id="target-label"></label><div class="line"><select id="target"></select><button id="choose" class="primary" disabled></button></div>
+    <label class="check"><input type="checkbox" id="share-label"><span id="share-label-copy"></span></label></form>
+  <label class="check" id="source-lookup-setting" hidden><input type="checkbox" id="source-lookup"><span id="source-lookup-copy"></span></label>
+  <button id="history-link" class="text-action"></button><button id="disconnect" class="text-action"></button>
+</dialog>
+<dialog id="history" aria-labelledby="history-heading"><header><h2 id="history-heading"></h2><button class="icon dismiss"></button></header><div id="past"></div></dialog>
+<div id="row-menu" popover="auto" aria-label="Conversation actions"></div>
+<div id="announcer" class="sr" role="status"></div>
+</body></html>

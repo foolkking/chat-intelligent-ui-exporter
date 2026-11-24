@@ -43,6 +43,7 @@ globalThis.ReaderArchive = (() => {
         if(meta.lineage==="tree"&&(!Array.isArray(row.sourcePath)||!row.sourcePath.length||row.sourcePath.length>128||!row.sourcePath.every(x=>ID.test(x))))throw Error("Missing selected tree path");
         const item={id:row.id,parent:meta.lineage==="tree"?prev:null,source_path:meta.lineage==="tree"?row.sourcePath:[],role:row.role,offset:pos,bytes:body.length,
           sha256:hex(await sha(body)),assets:row.assets,at:row.at||null};
+        if(meta.excerpt&&row.question)item.question=row.question;
         await index.write(JSON.stringify(item)+"\n");await md.write(body);await md.write("\n\n");pos+=body.length+2;prev=row.id;
       }
       if(!count)throw Error("No displayed messages");

@@ -33,8 +33,12 @@ async function progress(job,decision){
       await ledger(job.key,{iid});
     }
     const s=await (await api(job.device,"imports/"+iid)).json();
-    if(s.status==="committed"&&uuid(s.conversation_id)){
-      await ledger(job.key,{phase:"done",active:false,cid:s.conversation_id,title:String(s.title||"").slice(0,512),review:null});return;
+    if(job.mode==="append"||s.mode==="selective_append"){
+      // A device only delivers an excerpt. It can never confirm the destination,
+      // consent to a live share, or invoke the ordinary full-import commit.
+      if(job.mode!=="append"||s.mode!=="selective_append"||!uuid(iid))throw Error("Source receipt mismatch");
+      const phase=s.status==="committed"?"append-complete":s.status==="failed"?"append-attention":"append-ready";
+      await ledger(job.key,{iid,phase,active:false,review:null});return;
     }
     if(s.review){
       if(!decision&&(s.review.partial||s.review.live_share||s.review.action==="conflict")){
@@ -44,23 +48,25 @@ async function progress(job,decision){
       await api(job.device,`imports/${iid}/commit`,typed("POST",decision||{receipt:s.review.receipt}));
       await ledger(job.key,{phase:"queued",active:true,review:null});return;
     }
-    const failed=["failed","cancelled","canceled","resolving","needs_grouping"].includes(s.status);
-    await ledger(job.key,{phase:failed?"attention":s.wait?"resource-wait":"processing",active:!failed,percent:s.progress});
+    await ledger(job.key,ReaderTransferState(s));
   }catch(e){await ledger(job.key,{phase:e.status===401||e.status===403?"reconnect":"check",active:false});}
   finally{busy.delete(job.key);}
 }
-async function tick(){for(const j of await rpc("jobs"))if(j.active&&!live.has(j.key))await progress(j);}
+async function tick(){for(const j of await rpc("jobs"))if(j.active&&!live.has(j.key)){
+  if(j.local)await navigator.locks.request("reader-local-"+j.key,{ifAvailable:true},lock=>lock?progress(j):undefined);
+  else await progress(j);
+}}
 setInterval(()=>tick().catch(()=>{}),2500);
 chrome.runtime.onConnect.addListener(port=>{
   if(!port.name.startsWith("reader:")||!uuid(port.name.slice(7)))return;
   const sender=port.sender,u=new URL(sender.url);
   if(!sender.tab||sender.frameId!==0||u.origin!=="https://chatgpt.com")return;
-  const key=crypto.randomUUID();let t,dir,rows,current,assetPath,meta,count=0,total=0,finished=false,working=false,closed=false;
-  const assets=new Map();let delivered=false,noticed=false;
+  let key=crypto.randomUUID(),t,dir,rows,current,assetPath,meta,count=0,total=0,finished=false,working=false,closed=false;
+  const assets=new Map(),usedAssets=new Set();let lastSelectedUser=null,delivered=false,noticed=false;
   async function clean(reason){
     await Promise.allSettled([rows,current].filter(Boolean).map(w=>w.abort()));await erase(key);live.delete(key);
     if(t&&!delivered&&!noticed&&await rpc("device")===t.device){
-      noticed=true;await ledger(key,{device:t.device,phase:reason==="quota"?"storage-full":"capture-interrupted",active:false});
+      noticed=true;await ledger(key,{device:t.device,phase:reason==="cancel"?"cancelled":reason==="quota"?"storage-full":reason==="limit"?"capture-limit":"capture-interrupted",active:false});
     }
   }
   port.onDisconnect.addListener(()=>{closed=true;if(!working&&!finished)void clean().catch(()=>{});});
@@ -69,12 +75,16 @@ chrome.runtime.onConnect.addListener(port=>{
     try{
       if(!t){
         if(m.op!=="hello")throw Error("Capture not authorized.");
-        t=await rpc("ticket",{ticket:port.name.slice(7),tab:sender.tab.id,doc:sender.documentId,path:u.pathname});
-        live.add(key);await ledger(key,{device:t.device,phase:"reading",active:true});
+        t=await rpc("ticket",{ticket:port.name.slice(7),tab:sender.tab.id,doc:sender.documentId});
+        if(!uuid(t.attempt)||!t.sourceKey)throw Error("Capture expired.");
+        key=t.attempt;live.add(key);await ledger(key,{device:t.device,sourceKey:t.sourceKey,mode:t.mode==="append"?"append":"save",phase:"reading",active:true});
         await initialized;dir=await (await root).getDirectoryHandle(key,{create:true});
         rows=await (await dir.getFileHandle("rows",{create:true})).createWritable();
-      }else if(m.op==="header"&&!meta&&u.pathname.endsWith("/"+m.id)&&["tree","list"].includes(m.lineage)){
-        meta={id:m.id,title:String(m.title).slice(0,512),lineage:m.lineage};
+      }else if(m.op==="cancel-selection"&&t.mode==="append"&&!meta&&!count&&!delivered){finished=true;await clean("cancel");
+      }else if(m.op==="limit"&&!delivered){finished=true;await clean("limit");
+      }else if(m.op==="header"&&!meta&&t.path.replace(/\/$/,"").split("/").at(-1)===m.id&&["tree","list"].includes(m.lineage)){
+        if(t.mode==="append"&&m.lineage!=="list")throw Error("Sparse content is not a complete branch");
+        meta={id:m.id,title:String(m.title).slice(0,512),lineage:m.lineage,excerpt:t.mode==="append"};
       }else if(m.op==="asset"&&meta&&!current&&typeof m.path==="string"&&/^assets\/[\p{L}\p{N}_.-]{1,200}$/u.test(m.path)&&!assets.has(m.path)&&assets.size<2000){
         assetPath=m.path;const handle=await dir.getFileHandle("asset-"+assets.size,{create:true});assets.set(assetPath,handle);current=await handle.createWritable();
       }else if(m.op==="chunk"&&current&&typeof m.data==="string"&&m.data.length<=262144){
@@ -82,11 +92,19 @@ chrome.runtime.onConnect.addListener(port=>{
         await current.write(data);
       }else if(m.op==="endAsset"&&current){await current.close();current=null;
       }else if(m.op==="message"&&meta&&!current){
-        const row=m.row;if(!row||typeof row.body!=="string"||row.body.length>2*1024*1024||++count>50000||!Array.isArray(row.assets)||row.assets.some(p=>!assets.has(p)))throw Error("Invalid source message");
+        const row=m.row;if(!row||typeof row.body!=="string"||!Array.isArray(row.assets)||row.assets.some(p=>!assets.has(p)))throw Error("Invalid source message");
+        if(new TextEncoder().encode(row.body).byteLength>2*1024*1024||++count>(t.mode==="append"?250:50000))throw Error("Source message exceeds capture limit");
+        if(t.mode==="append"){
+          if(row.sourcePath||!["user","assistant"].includes(row.role)||row.question!=null&&
+            (row.role!=="assistant"||row.question!==lastSelectedUser))throw Error("Unselected source relationship");
+          if(row.role==="user")lastSelectedUser=row.id;
+          for(const path of row.assets)usedAssets.add(path);
+        }
         const line=JSON.stringify(row)+"\n";if((total+=new TextEncoder().encode(line).length)>100*1024*1024)throw Error("Package too large");
         await rows.write(line);
       }else if(m.op==="finish"&&meta&&count&&!current){
         if(!Array.isArray(m.images)||m.images.some(p=>!assets.has(p)))throw Error("Invalid image reference");
+        if(t.mode==="append"&&usedAssets.size!==assets.size)throw Error("Only selected resources can be sent");
         meta.partial=!!m.partial;meta.images=m.images;await rows.close();rows=null;
         const space=await navigator.storage.estimate();
         if(space.quota&&space.quota-(space.usage||0)<total*2+1048576)throw Error("Not enough browser temporary storage. Nothing was sent.");
@@ -96,18 +114,20 @@ chrome.runtime.onConnect.addListener(port=>{
           if(buf)throw Error("Incomplete message spool");
         }
         const zip=await ReaderArchive.build(dir,meta,readRows,assets);
-        if(closed||await rpc("device")!==t.device)throw Error("Source tab or account changed.");
-        delivered=true;await ledger(key,{device:t.device,phase:"uploading",active:true,losses:m.losses});
-        const form=new FormData();form.append("files",zip,"reader.zip");if(t.project)form.append("target_project_id",t.project);
+        if(closed||await rpc("device")!==t.device||t.mode==="append"&&!await rpc("source-current",{tab:t.tab,doc:t.doc,path:t.path}))throw Error("Source tab or account changed.");
+        delivered=true;await ledger(key,{device:t.device,phase:"uploading",active:true,partial:meta.partial,losses:m.losses});
+        const form=new FormData();form.append("files",zip,"reader.zip");if(t.mode!=="append"&&t.project)form.append("target_project_id",t.project);
         try{
-          const result=await (await api(t.device,"imports",{method:"POST",headers:{"Idempotency-Key":key},body:form})).json();
-          await ledger(key,{iid:result.id,phase:"received",active:true});
+          const result=await (await api(t.device,t.mode==="append"?"append-imports":"imports",{method:"POST",headers:{"Idempotency-Key":key},body:form})).json();
+          if(!uuid(result.id))throw Error("Unconfirmed upload receipt");
+          await ledger(key,{iid:result.id,phase:t.mode==="append"?"append-ready":"received",active:t.mode!=="append",
+            ...(t.mode==="append"?{settledAt:Date.now()}:{})});
         }catch(e){await ledger(key,{phase:e.status&&e.status<500?"upload-rejected":"upload-unknown",active:!e.status||e.status>=500});throw e;}
         finally{live.delete(key);}
         finished=true;await erase(key);
       }else throw Error("Invalid transfer sequence");
       if(!closed)port.postMessage({ok:true});
-    }catch(e){if(!closed)port.postMessage({error:e.message});closed=true;await clean(e.name==="QuotaExceededError"||e.message.includes("temporary storage")?"quota":null);port.disconnect();}
+    }catch(e){if(!closed)port.postMessage({error:e.message});closed=true;await clean(e.name==="QuotaExceededError"||e.message.includes("temporary storage")?"quota":/limit|too large/i.test(e.message)?"limit":null);port.disconnect();}
     finally{working=false;if(closed&&!finished)await clean();}
   });
 });

@@ -7,16 +7,7 @@
   const leaf=()=>[...document.querySelectorAll("[data-message-id]")].filter(n=>!n.closest('[hidden],[aria-hidden="true"]')).at(-1)?.dataset.messageId;
   const generating=()=>!!document.querySelector('[data-testid="stop-button"],[data-talvt-turn-state="in_progress"],button[aria-label="Stop generating"],button[aria-label="停止生成"]');
   const text=(cn,en)=>navigator.language.startsWith("zh")?cn:en;
-  let busy=false,hidden=false,cancelCapture=null;
-  const host=document.createElement("div"),shadow=host.attachShadow({mode:"closed"}),btn=document.createElement("button");
-  const hide=document.createElement("button");hide.textContent="×";hide.setAttribute("aria-label",text("隐藏保存按钮","Hide Save button"));
-  const style=document.createElement("style");style.textContent=":host{position:fixed;inset:auto 12px 76px auto;z-index:9999}div{display:flex;border:1px solid #ccc9c0;border-radius:8px;background:#f8f7f3;color:#254e47}button{background:none;color:inherit;font:13px system-ui;border:0;min-height:44px;padding:0 10px;cursor:pointer}button:focus-visible{outline:2px solid #007965}button:last-child{padding:0 7px} @media(prefers-color-scheme:dark){div{background:#252723;color:#b2d7ce;border-color:#535650}}";
-  const bar=document.createElement("div");bar.append(btn,hide);shadow.append(style,bar);
-  const label=text("保存到 Reader","Save to Reader");btn.textContent=label;
-  const hideLabel=hide.getAttribute("aria-label");
-  hide.onclick=e=>{if(!e.isTrusted)return;if(busy){cancelCapture?.();return;}hidden=true;host.remove();};
-  function mount(){if(!hidden&&pathId()&&!host.isConnected)document.body?.append(host);else if(!pathId()&&host.isConnected)host.remove();}
-  mount();new MutationObserver(mount).observe(document.documentElement,{childList:true,subtree:true});
+  let cancelCapture=null;
   const idOK=s=>typeof s==="string"&&/^[\w-]{1,128}$/.test(s);
   function wire(ticket){
     const port=chrome.runtime.connect({name:"reader:"+ticket});let pending=null,dead=false;
@@ -25,11 +16,14 @@
     return {send:m=>new Promise((resolve,reject)=>{if(dead||pending)return reject(Error("Transfer interrupted"));pending={resolve,reject};port.postMessage(m)}),
       close:()=>{dead=true;pending?.reject(Error(text("读取已取消","Capture cancelled")));pending=null;port.disconnect();}};
   }
-  async function capture(){
+  async function capture(onStart,excerpt=false){
     const id=pathId(),route=location.pathname,initialLeaf=leaf(),controller=new AbortController();let budget=32*1024*1024;
     const check=()=>{controller.signal.throwIfAborted();if(location.pathname!==route||generating()||initialLeaf&&leaf()&&initialLeaf!==leaf())throw Error(text("对话或分支发生变化，请重新保存。","Conversation or branch changed. Save again."));};
     cancelCapture=()=>controller.abort();
-    check();const start=await chrome.runtime.sendMessage({kind:"start"});check();if(!start?.ticket)throw Error(start?.error||"Open the Reader panel first.");
+    check();const start=await chrome.runtime.sendMessage({kind:excerpt?"start-append":"start",path:route});check();
+    if(!start?.ticket){const e=Error(text("未开始保存。请在侧栏核对目标、连接和实例是否支持网页保存。","Save did not start. Check destination, connection and capture support in the panel."));
+      e.displayState=start?.state||(["reconnect","unavailable"].includes(start?.error)?start.error:null);throw e;}
+    onStart(start.attempt);
     const port=wire(start.ticket);
     cancelCapture=()=>{controller.abort();port.close();};
     const guard=()=>{try{check();}catch{cancelCapture?.();}};
@@ -56,7 +50,10 @@
       const api=globalThis.FastTextExporter,data=await api.loadConversation({id,leafId:initialLeaf,fetch:request,
         signal:controller.signal,retainRaw:false,maxMessages:50000,sourcePaths:true});
       const lineage=data.source==="conversation-tree"?"tree":"list";
-      await port.send({op:"header",id,title:data.title,lineage});
+      const chosen=excerpt?await ReaderExcerpt.choose(data.messages,data.title,m=>ReaderVisible(m,api).body,controller.signal):null;
+      check();
+      const items=chosen?ReaderExcerpt.selected(data.messages,chosen,lineage==="tree"):null;
+      await port.send({op:"header",id,title:data.title,lineage:excerpt?"list":lineage});
       const paths=new Map(),images=new Set(),losses={files:0,interactions:data.warnings?.length||0,links:0};let partial=losses.interactions>0;
       const slots=Number(navigator.deviceMemory)>=4?2:1;
       async function prepareResource(ref,info,m){
@@ -81,7 +78,8 @@
         }
         await port.send({op:"endAsset"});paths.set(identity,path);if(info.image)images.add(path);return path;
       }
-      for(const m of data.messages){
+      for(const entry of items??data.messages){
+        const m=items?entry.row:entry;
         check();if(!idOK(m.id))throw Error("Invalid message identity");
         const visible=globalThis.ReaderVisible(m,api);let body=visible.body;const assets=new Set(), jobs=new Map();
         if(visible.missing)partial=true;
@@ -102,15 +100,22 @@
         // Do not persist expiring media links or cause Reader clients to load external pixels.
         body=body.replace(/!\[([^\]]*)\]\(https?:\/\/[^)\s]+\)/gi,(_,alt)=>{partial=true;losses.links++;return `[${alt||"Image"} unavailable]`;})
           .replace(/https?:\/\/[^\s)<>]*(?:[?&](?:x-amz-signature|x-goog-signature|sig|access_token)=)[^\s)<>]*/gi,()=>{partial=true;losses.links++;return "[temporary link omitted]";});
-        await port.send({op:"message",row:{id:m.id,sourcePath:m.sourcePath,role:m.role,at:Number.isFinite(m.createTime)?new Date(m.createTime*1000).toISOString():null,body,assets:[...assets]}});
+        await port.send({op:"message",row:{id:m.id,...(!excerpt?{sourcePath:m.sourcePath}:entry.question?{question:entry.question}:{}),role:m.role,at:Number.isFinite(m.createTime)?new Date(m.createTime*1000).toISOString():null,body,assets:[...assets]}});
       }
-      check();await port.send({op:"finish",partial,losses,images:[...images]});return text("已交给 Reader · 在侧栏查看","Sent to Reader · see side panel");
+      check();await port.send({op:"finish",partial,losses,images:[...images]});
+      if(excerpt){check();const r=await chrome.runtime.sendMessage({kind:"open-append",path:route,attempt:start.attempt});
+        if(!r?.ok)throw Error(text("已交给 Reader，可在侧栏任务中继续。","Received by Reader. Continue from side-panel tasks."));}
+    }catch(e){
+      if(excerpt&&e.name==="AbortError"&&!controller.signal.aborted){
+        // A user cancelling before choosing is not an interrupted upload.
+        await port.send({op:"cancel-selection"}).catch(()=>{});
+      }
+      if(/limit|too large|too many|too long|exceeds/i.test(e.message)){
+        await port.send({op:"limit"}).catch(()=>{});
+        throw Error(text("超出单次采集上限，未发送。可在 Reader 手动导入来源文件。","This conversation exceeds the capture limit and was not sent. Import the source file in Reader."));
+      }
+      throw e;
     }finally{watch.disconnect();clearInterval(clock);removeEventListener("popstate",guard);controller.abort();port.close();}
   }
-  btn.onclick=async e=>{
-    if(!e.isTrusted||busy||!pathId())return;busy=true;btn.disabled=true;btn.textContent=text("正在读取…","Reading…");
-    hide.setAttribute("aria-label",text("取消未交付的读取","Cancel capture before delivery"));hide.title=hide.getAttribute("aria-label");
-    try{btn.textContent=await capture();}catch(e){btn.textContent=e.message||text("未保存，请重试","Not saved; try again");}
-    finally{busy=false;cancelCapture=null;hide.setAttribute("aria-label",hideLabel);hide.title=hideLabel;btn.disabled=false;setTimeout(()=>{if(!busy)btn.textContent=label;},7000);}
-  };
+  ReaderSourceControl({pathId,capture:async (onStart,excerpt)=>{try{await capture(onStart,excerpt);}finally{cancelCapture=null;}},cancel:()=>cancelCapture?.()});
 })();

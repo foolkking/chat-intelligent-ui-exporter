@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Chat Reader · Import</title><link rel="stylesheet" href="panel.css"><link rel="stylesheet" href="center.css">
+<script defer src="config.js"></script><script defer src="client.js"></script><script defer src="glyphs.js"></script>
+<script defer src="vendor/fflate-0.8.3.js"></script><script defer src="locales/en.js"></script><script defer src="locales/zh_CN.js"></script><script defer src="i18n.js"></script><script defer src="fast-text.js"></script>
+<script defer src="sha256.js"></script><script defer src="source-file.js"></script><script defer src="visible.js"></script>
+<script defer src="package.js"></script><script defer src="zip-source.js"></script><script defer src="archive-source.js"></script>
+<script defer src="progress.js"></script><script defer src="batch-model.js"></script><script defer src="center-selection.js"></script><script defer src="center.js"></script>
+</head><body>
+<header class="center-head"><a id="brand" href="panel.html">Chat Reader</a><h1 id="heading"></h1><button id="library-link"></button></header>
+<main class="center-main">
+  <nav id="steps" aria-label="Import steps"></nav>
+  <p id="error" role="alert"></p><p id="activity" role="status" aria-live="polite"></p>
+  <section id="source-step" aria-labelledby="source-heading">
+    <h2 id="source-heading"></h2><div class="source-choices">
+      <section><h3 id="web-heading"></h3><p id="web-note"></p><button id="web-source" class="primary"></button><div id="web-tabs" hidden></div></section>
+      <section><h3 id="archive-heading"></h3><p id="archive-note"></p><label id="file-label" class="file-pick"><span id="file-copy"></span><input id="source-file" type="file" accept=".zip,.json,application/zip,application/json"></label></section>
+    </div>
+    <div id="resume-box" hidden><h3 id="resume-heading"></h3><p id="resume-note"></p><button id="resume-plan"></button><button id="forget-plan"></button></div>
+  </section>
+  <section id="selection-step" hidden aria-labelledby="selection-heading">
+    <h2 id="selection-heading"></h2><p id="source-status"></p>
+    <div class="catalogue-layout"><aside><label for="source-group" id="group-label"></label><select id="source-group"></select><div id="group-summary"></div></aside>
+      <section><div class="catalogue-tools"><label class="sr" for="source-query" id="query-label"></label><input type="search" id="source-query" autocomplete="off">
+        <select id="selection-view" aria-label="显示范围"><option value="all">全部对话</option><option value="selected">已选清单</option></select></div>
+        <div class="selection-actions"><button id="select-page" type="button">选择本页</button><button id="select-visible"></button>
+          <button id="select-project" type="button" hidden>选择此导出包内整个项目</button><button id="clear-selection"></button></div>
+        <p id="selected-count" role="status"></p><ul id="source-rows" class="source-rows" tabindex="0" aria-label="来源对话"></ul>
+        <div class="selection-pagination"><button id="source-prev" type="button">上一页</button><span id="source-page-status" role="status"></span><button id="source-more" type="button">下一页</button></div>
+      </section></div>
+    <footer class="step-actions"><button id="back-source"></button><button id="to-target" class="primary" disabled></button></footer>
+  </section>
+  <section id="target-step" hidden aria-labelledby="target-heading">
+    <h2 id="target-heading"></h2>
+    <section id="connection"><p id="account"></p><button id="pair-start" class="primary" hidden></button>
+      <div id="pair-info" hidden><output id="short-code"></output><p id="pair-help"></p><a id="pair-reader" target="_blank" rel="noopener noreferrer"></a><button id="pair-cancel"></button></div></section>
+    <section id="targets" hidden>
+      <label for="target-mode" id="mode-label"></label><select id="target-mode"></select>
+      <div id="target-mappings"></div><div class="target-tools"><a id="new-project" target="_blank" rel="noopener noreferrer"></a><button id="reload-projects"></button></div>
+      <label class="check"><input type="checkbox" id="include-files" checked><span id="include-files-label"></span></label>
+      <label class="check"><input type="checkbox" id="remember-mapping"><span id="remember-label"></span></label>
+      <button id="check-bindings" type="button"></button><p id="bindings-status" role="status"></p>
+      <p id="append-policy"></p><p id="confirm-summary"></p>
+    </section>
+    <footer class="step-actions"><button id="back-selection"></button><button id="confirm-import" class="primary" disabled></button></footer>
+  </section>
+  <section id="tasks-step" hidden aria-labelledby="tasks-heading">
+    <h2 id="tasks-heading"></h2><p id="task-summary" role="status"></p>
+    <div class="queue-actions"><button id="pause-queue"></button><button id="continue-queue"></button><button id="retry-failed"></button><button id="cancel-pending"></button><button id="new-import"></button></div>
+    <p id="source-needed" hidden></p><label id="resume-file-label" class="file-pick" hidden><span id="resume-file-copy"></span><input id="resume-file" type="file" accept=".zip,.json,application/zip,application/json"></label>
+    <button id="restore-web" hidden></button><div id="resume-web-tabs" hidden></div>
+    <label class="sr" for="task-filter">任务筛选</label><select id="task-filter" aria-label="任务筛选"><option value="all">全部任务</option><option value="review">待核对</option><option value="attention">需要处理</option><option value="done">已完成</option><option value="waiting">等待或处理中</option></select>
+    <ul id="task-rows" class="source-rows" tabindex="0" aria-label="导入任务"></ul>
+    <div class="task-pagination"><button id="task-prev" type="button">上一页</button><span id="task-page-status" role="status"></span><button id="task-next" type="button">下一页</button></div>
+  </section>
+</main></body></html>

@@ -3,7 +3,7 @@ const fs=require("node:fs"),os=require("node:os"),path=require("node:path"),cp=r
 const Fast=require("../extension/fast-text.js");
 require("../reader/visible.js");
 require("../reader/append-picker.js");
-globalThis.fflate=require("../reader/vendor/fflate-0.8.3.js");require("../reader/package.js");
+globalThis.fflate=require("../reader/vendor/fflate-0.8.3.js");require("../reader/sha256.js");require("../reader/package.js");
 const sha=x=>createHash("sha256").update(x).digest("hex");
 function directory(){
   const entries=new Map();
@@ -56,13 +56,19 @@ test("private package is origin-bound, has no generic tab/cookie permissions, an
   assert.deepEqual(m.host_permissions,["https://reader.example.test/*","https://chatgpt.com/*"]);assert.equal(m.incognito,"not_allowed");
   assert.ok(!m.permissions.some(x=>["cookies","tabs","debugger","webRequest","scripting","<all_urls>"].includes(x))&&!m.externally_connectable);
   const text=name=>fs.readFileSync(path.join(out,name),"utf8");
-  const included=[m.background.service_worker,m.side_panel.default_path,...m.content_scripts.flatMap(x=>x.js),"host.html"];
-  for(const doc of [m.side_panel.default_path,"host.html"])
+  assert.equal(m.side_panel,undefined);assert.ok(!m.permissions.includes("sidePanel"));
+  const pages=["panel.html","host.html","frame.html","center.html"];
+  const included=[m.background.service_worker,...m.content_scripts.flatMap(x=>x.js),...pages];
+  for(const doc of pages)
     for(const ref of text(doc).matchAll(/<(?:script|link)\b[^>]*(?:src|href)="([^"]+)"/g))included.push(ref[1]);
   for(const imp of text(m.background.service_worker).matchAll(/importScripts\(([^)]+)\)/g))
     for(const ref of imp[1].matchAll(/"([^"]+)"/g))included.push(ref[1]);
   for(const name of included){assert.match(name,/^[\w/.-]+$/);assert.ok(fs.statSync(path.join(out,name)).isFile(),name);}
   assert.ok(included.includes("transfer-state.js")&&included.includes("source-actions.js")&&included.includes("append-picker.js"));
+  for(const name of ["center.js","center.css","workspace.js","batch-worker.js","batch-model.js","zip-source.js","archive-source.js"])
+    assert.ok(included.includes(name),"Missing import center resource: "+name);
+  const captureScripts=m.content_scripts[0].js;
+  assert.ok(captureScripts.indexOf("routes.js")<captureScripts.indexOf("workspace.js")&&captureScripts.indexOf("workspace.js")<captureScripts.indexOf("capture.js"));
   assert.ok(!fs.existsSync(path.join(out,"local-picker.js"))&&!fs.existsSync(path.join(out,"local-source.js")));
   assert.notEqual(build("https://reader.example.test").status,0);
 });

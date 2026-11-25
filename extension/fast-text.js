@@ -5,7 +5,11 @@
   // Uploaded and generated images point at the files service, e.g.
   // file-service://file-abc or sediment://file_abc.
   const fileIdOf = pointer => typeof pointer === 'string' ? pointer.match(/^(?:file-service|sediment):\/\/([\w-]+)$/)?.[1] || null : null;
-  const fence = text => '`'.repeat(Math.max(3, ...Array.from(text.matchAll(/`+/g), m => m[0].length + 1)));
+  const fence = text => {
+    let width = 3;
+    for (const match of text.matchAll(/`+/g)) width = Math.max(width, match[0].length + 1);
+    return '`'.repeat(width);
+  };
   function textOf(message, warnings) {
     const content = message.content || {};
     const fallback = message.metadata?.model_dil_v2?.fallbackMarkdown;
@@ -115,7 +119,7 @@
     const outputs = (message.metadata?.aggregate_result?.messages || []).filter(m => m?.message_type === 'image' && fileIdOf(m.image_url)).map((m, i) => ({fileId:fileIdOf(m.image_url), width:m.width, height:m.height, alt:plots?.[i]?.title ? t('md.plotNamed', plots[i].title) : t('md.plot')}));
     return [...parts, ...outputs].map(i => ({...i, alt:i.alt.replace(/[[\]\r\n]/g, ' ')}));
   }
-  function records(messages) {
+  function records(messages, {allowEmpty=false}={}) {
     const warnings = [], result = [], seen = new Set();
     for (const message of messages) {
       if (!message) continue;
@@ -170,7 +174,7 @@
       // The time and model are shown in the sidebar and, when asked, written into the Markdown.
       if (md.trim()) result.push({id:message.id, role, ...normalized, createTime:Number.isFinite(message.create_time) ? message.create_time : undefined, model:role === 'assistant' ? message.metadata?.model_slug : undefined, summary:md.replace(/\s+/g,' ').slice(0,100)});
     }
-    if (!result.length) error(t('err.nothingToExport'));
+    if (!result.length && !allowEmpty) error(t('err.nothingToExport'));
     return {messages:result,warnings};
   }
   function parseTree(data, leafId, {sourcePaths=false,maxMessages=Infinity}={}) {
@@ -211,14 +215,14 @@
     if(keys){
       const displayed=new Map(result.messages.map(m=>[m.id,m]));let segment=[];
       for(const key of keys.reverse()){
-        if(!/^[\w-]{1,128}$/.test(key)||segment.length>=128)error(t('err.treeBroken'));
+        if(!/^[\w-]{1,128}$/.test(key))error(t('err.treeBroken'));
         segment.push(key);const row=displayed.get(map[key].message?.id);
         if(row){row.sourcePath=segment;segment=[];}
       }
     }
     return {...result, title:data.title || 'ChatGPT', branch:selectedLeaf};
   }
-  async function loadConversation({id,share=false,leafId,fetch:request,signal,onProgress,retainRaw=true,maxMessages=Infinity,sourcePaths=false}) {
+  async function loadConversation({id,share=false,leafId,fetch:request,signal,onProgress,retainRaw=true,maxMessages=Infinity,sourcePaths=false,readerSource}) {
     if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) error(t('err.openChat'));
     async function get(path, headers = {}) {
       signal?.throwIfAborted();
@@ -242,6 +246,7 @@
     const legacy = await get(`/backend-api/conversation/${encodeURIComponent(id)}`, headers);
     let data, pages = 1;
     if (legacy.ok) {
+      if (readerSource) return readerSource.tree(legacy);
       data = await legacy.json();
       if (data.conversation_id && data.conversation_id !== id) error(t('err.otherChat'));
       if (data.mapping) return {...parseTree(data,leafId,{sourcePaths,maxMessages}),pages,source:'conversation-tree',...(retainRaw?{raw:data}:{})};
@@ -253,6 +258,14 @@
       const suffix = cursor ? `&before=${encodeURIComponent(cursor)}` : '';
       const response = await get(`/backend-api/conversations/${encodeURIComponent(id)}?include_has_versions=true&num_turns=100${suffix}`,headers);
       if (!response.ok) error(t('err.historyFailed', response.status));
+      if (readerSource) {
+        const page = await readerSource.page(response, pages);
+        if (page.result) return page.result;
+        cursor = page.before;
+        if (!cursor || seenCursors.has(cursor)) error(t('err.pageCursor'));
+        seenCursors.add(cursor); pages++;
+        continue;
+      }
       data = await response.json();
       if (data.conversation_id && data.conversation_id !== id) error(t('err.otherChat'));
       if (data.mapping && !cursor) return {...parseTree(data,leafId,{sourcePaths,maxMessages}),pages,source:'conversation-tree',...(retainRaw?{raw:data}:{})};
@@ -299,7 +312,7 @@
   }
   // Downloads original images through the files API, in parallel and without
   // touching the page. Failures are returned per item so the caller can fall back.
-  async function downloadFiles({ids, conversationId, fetch:request, signal, concurrency = 6, onProgress}) {
+  async function downloadFiles({ids, conversationId, fetch:request, signal, concurrency = 6, onProgress, streamMedia=false}) {
     const unique = [...new Set(ids)];
     if (!unique.length) return [];
     const sessionResponse = await request('/api/auth/session',{credentials:'same-origin',signal});
@@ -320,6 +333,7 @@
         const sameOrigin = url.startsWith('/') || url.startsWith(root.location?.origin + '/');
         const file = await request(url,{credentials:sameOrigin ? 'include' : 'omit',signal});
         if (!file.ok) throw Error(t('err.downloadHttp', file.status));
+        if (streamMedia && file.body) return {fileId, stream:file.body, headers:file.headers, ext:extensionOf(file.headers.get('content-type'))};
         const blob = await file.blob();
         let ext = extensionOf(blob.type || file.headers?.get?.('content-type'));
         if (ext === 'bin') ext = await sniffImage(blob);
@@ -366,7 +380,7 @@
     return {md:[line(head), `| ${head.map(() => '---').join(' | ')} |`, ...body.slice(0, limit).map(line)].join('\n'), rows:body.length, cols:head.length};
   }
   // Files the code interpreter wrote (sandbox:/mnt/data/...), linked from a message.
-  async function downloadSandboxFiles({items, conversationId, fetch:request, signal, concurrency = 4, cached = new Map()}) {
+  async function downloadSandboxFiles({items, conversationId, fetch:request, signal, concurrency = 4, cached = new Map(), streamMedia=false}) {
     if (!items.length) return [];
     const sessionResponse = await request('/api/auth/session',{credentials:'same-origin',signal});
     if (!sessionResponse.ok) error(t('err.session', sessionResponse.status));
@@ -386,12 +400,13 @@
           const sameOrigin = url.startsWith('/') || url.startsWith(root.location?.origin + '/');
           const file = await request(url,{credentials:sameOrigin ? 'include' : 'omit',signal});
           if (!file.ok) throw Error(t('err.downloadHttp', file.status));
+          if (streamMedia && file.body) return {stream:file.body, headers:file.headers};
           return file.blob();
         })();
         let name = (given || path.split('/').pop() || 'file').replace(/[^\p{L}\p{N}_.\-]/gu, '_'), n = 1;
         while (names.has(name)) name = name.replace(/(\.[^.]*)?$/, m => `-${++n}${m}`);
         names.add(name);
-        return {messageId, path, blob, localPath:`files/${name}`};
+        return {messageId, path, ...(streamMedia && blob.stream && !(blob instanceof Blob) ? blob : {blob}), localPath:`files/${name}`};
       } catch (e) {
         if (e?.name === 'AbortError') throw e;
         return {messageId, path, error:e.message};
@@ -469,7 +484,7 @@
     const title = `# ${conversation.title.replace(/\s+/g,' ').trim()}`;
     return `${yaml ? `${properties(conversation, selected, url, options)}\n\n${title}` : `${title}\n\n${t('md.source', url)}`}\n\n${body}\n${note}`;
   }
-  const api = {fileIdOf,textOf,normalizeText,applyReferences,toolImages,records,parseTree,loadConversation,downloadFiles,downloadSandboxFiles,dilImageUrls,downloadUrls,csvTable,markdown};
+  const api = {fileIdOf,textOf,normalizeText,applyReferences,toolImages,records,parseTree,loadConversation,downloadFiles,downloadSandboxFiles,sniffImage,dilImageUrls,downloadUrls,csvTable,markdown};
   root.FastTextExporter = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(globalThis);

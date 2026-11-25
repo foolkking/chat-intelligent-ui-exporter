@@ -2,11 +2,11 @@
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Chat Reader</title><link rel="stylesheet" href="panel.css">
 <script defer src="config.js"></script><script defer src="client.js"></script><script defer src="glyphs.js"></script>
-<script defer src="panel-export.js"></script><script defer src="panel-jobs.js"></script><script defer src="panel.js"></script></head>
+<script defer src="progress.js"></script><script defer src="panel-export.js"></script><script defer src="panel-jobs.js"></script><script defer src="panel.js"></script></head>
 <body>
-<header class="mast"><h1><span data-glyph="book"></span>Chat Reader</h1><button id="settings-label" class="icon" hidden></button></header>
+<header class="mast"><h1><span data-glyph="book"></span>Chat Reader</h1><div><button id="import-center" class="text-action"></button><button id="settings-label" class="icon" hidden></button></div></header>
 <main>
-  <section id="pair" hidden><p id="instance"></p><button id="connect" class="primary"></button></section>
+  <section id="pair" hidden><p id="instance"></p><button id="connect" class="primary"></button><div id="pair-info" hidden><output id="short-code"></output><p id="pair-help"></p><a id="pair-reader" target="_blank" rel="noopener noreferrer"></a> <button id="pair-cancel"></button></div></section>
   <section id="boot" hidden><p id="boot-status" role="status"></p><button id="boot-retry" type="button" class="text-action" hidden></button></section>
   <section id="library" hidden>
     <form id="search" role="search"><input id="q" type="search" maxlength="200" autocomplete="off"><button id="find" class="icon" type="submit"></button></form>
@@ -21,10 +21,16 @@
 </main>
 <dialog id="settings" aria-labelledby="settings-heading">
   <header><h2 id="settings-heading"></h2><button class="icon dismiss"></button></header>
-  <p id="identity"></p>
+  <h3 id="auth-heading"></h3><p id="identity"></p><a id="manage-devices" target="_blank" rel="noopener noreferrer"></a>
+  <h3 id="import-heading"></h3>
   <form id="dest" hidden><label for="target" id="target-label"></label><div class="line"><select id="target"></select><button id="choose" class="primary" disabled></button></div>
-    <label class="check"><input type="checkbox" id="share-label"><span id="share-label-copy"></span></label></form>
+    <label class="check"><input type="checkbox" id="share-label"><span id="share-label-copy"></span></label>
+    <label class="check"><input type="checkbox" id="text-only"><span id="text-only-copy"></span></label></form>
   <label class="check" id="source-lookup-setting" hidden><input type="checkbox" id="source-lookup"><span id="source-lookup-copy"></span></label>
+  <section id="ai-options" hidden><h3 id="ai-heading"></h3>
+    <label class="check"><input type="checkbox" id="ai-files"><span id="ai-files-copy"></span></label>
+    <label class="check"><input type="checkbox" id="ai-handoff"><span id="ai-handoff-copy"></span></label>
+    <button id="ai-save" class="text-action"></button><span id="ai-status" role="status"></span></section>
   <button id="history-link" class="text-action"></button><button id="disconnect" class="text-action"></button>
 </dialog>
 <dialog id="history" aria-labelledby="history-heading"><header><h2 id="history-heading"></h2><button class="icon dismiss"></button></header><div id="past"></div></dialog>

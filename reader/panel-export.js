@@ -19,7 +19,7 @@ async function pollExport(){
     if(s.status==="committed"&&s.artifact_id){await navigator.locks.request("reader-export-request",async()=>{
       const latest=(await storage.get("exportJob")).exportJob;
       if(latest?.id!==j.id||latest.aid)return;
-      await session();await storage.set({exportJob:{...j,aid:s.artifact_id}});await download(s.artifact_id);
+      await session();await storage.set({exportJob:{...j,aid:s.artifact_id,delivery:s.delivery}});await download(s.artifact_id);
     });}
     else if(["failed","canceled","cancelled"].includes(s.status)){await storage.remove("exportJob");throw Error(loc("导出未完成，可以重试。","Export failed; retry."));}
   }catch(e){$("error").textContent=e.message;}finally{exportPolling=false;}

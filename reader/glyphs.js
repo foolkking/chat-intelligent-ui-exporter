@@ -1,6 +1,7 @@
 // Local monochrome glyphs. Accessible names live on the associated control, never in a tooltip alone.
 globalThis.ReaderGlyph = name => {
   const paths = {
+    reader:"M11 7.5a5.6 5.6 0 1 0 0 9M16 18V7.5m0 5.5c0-4 2.5-6 6-5.5",
     book:"M12 5.5C8.5 3.4 5.3 3.4 2.5 4.5v14c2.8-1.1 6-1.1 9.5 1 3.5-2.1 6.7-2.1 9.5-1v-14c-2.8-1.1-6-1.1-9.5 1Zm0 0v14",
     settings:"m9.5 3 .7-1h3.6l.7 2.1 2 .9 2.1-.5 1.8 3.1-1.4 1.6.2 2.4 1.4 1.6-1.8 3.1-2.1-.4-2 1-.7 2h-3.6l-.7-2-2-1-2.1.4-1.8-3.1 1.4-1.6.2-2.4L2.4 7.6l1.8-3.1 2.1.5 2-.9.4-1.1ZM15.2 10.8a3.2 3.2 0 1 1-6.4 0 3.2 3.2 0 1 1 6.4 0",
     search:"M16 16l4.5 4.5M18 10.5a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0",

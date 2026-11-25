@@ -1,0 +1,307 @@
+globalThis.ReaderOverlay = ({read,busy}) => {
+  const L=(zh,en)=>navigator.language.startsWith("zh")?zh:en;
+  const host=document.createElement("div"),shadow=host.attachShadow({mode:"closed"});
+  const make=(tag,cls="",text="")=>{const el=document.createElement(tag);el.className=cls;el.textContent=text;return el;};
+  const button=(label,fn,cls="")=>{const el=make("button",cls,label);el.type="button";el.onclick=e=>{if(e.isTrusted)fn();};return el;};
+  const icon=(name,label,fn)=>{const el=button("",fn,"icon");el.title=label;el.setAttribute("aria-label",label);el.append(ReaderGlyph(name));return el;};
+  const style=make("style");style.textContent=`
+    :host{all:initial;position:fixed;top:var(--reader-top,24vh);right:0;z-index:10010;font:14px/1.45 system-ui,"Microsoft YaHei",sans-serif;color:#25312b;
+      --p:#faf9f6;--fg:#25312b;--sub:#566259;--line:#dcded7;--sel:#e7f1eb;--accent:#086b5b;color-scheme:light dark}
+    @media(prefers-color-scheme:dark){:host{--p:#282b27;--fg:#f1f2e9;--sub:#bdc6bd;--line:#454b43;--sel:#34463e;--accent:#9ce1c8}}
+    *,*::before{box-sizing:border-box}[hidden]{display:none!important}button,input{font:inherit;color:var(--fg)}
+    button{border:0;background:transparent;cursor:pointer;min-height:44px;border-radius:5px}button:hover,button[aria-pressed=true],
+    .active{background:var(--sel);color:var(--accent)}:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+    .handle{width:24px;height:54px;position:absolute;right:0;top:0;background:transparent;display:grid;place-items:center}
+    .handle:before{content:"";width:7px;height:36px;border-radius:6px 0 0 6px;background:var(--accent);justify-self:end}
+    .handle:hover:before,.handle:focus-visible:before{width:12px}.handle:after{content:"";position:absolute;inset:0 -1px 0 -20px}
+    .frame{position:absolute;right:8px;top:0;width:min(328px,calc(100vw - 16px));height:min(508px,var(--reader-room,65dvh));
+      display:flex;flex-direction:column;border:1px solid var(--line);border-radius:10px;background:var(--p);color:var(--fg);
+      box-shadow:0 3px 16px #1328191c;overflow:hidden}
+    header,.modes,nav,.find{display:flex;align-items:center;gap:3px;padding:3px 8px}header{border-bottom:1px solid var(--line)}
+    header .icon{margin-inline-start:auto}.modes{min-width:0;padding:0}.modes button{font-weight:600;white-space:normal;line-height:1.25;padding:4px 7px}.icon{display:grid;place-items:center;min-width:44px}
+    svg{width:17px;height:17px;fill:none}.work{min-height:0;flex:1;display:flex;flex-direction:column}
+    nav{border-bottom:1px solid var(--line)}nav .icon{margin-inline-start:auto}.find input{min-width:0;flex:1;padding:7px 9px;background:var(--p);border:1px solid var(--line);border-radius:6px}
+    .list{overflow:auto;overscroll-behavior:contain;min-height:0;flex:1;padding:3px 7px;scrollbar-width:thin}
+    .list button{text-align:start;padding:5px 7px;overflow-wrap:anywhere}.row{display:flex;flex-wrap:wrap;align-items:start;border-bottom:1px solid var(--line)}
+    .row>.entry{flex:1;min-width:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .row .fold{color:var(--sub);min-width:44px}.child{display:block;width:100%;color:var(--sub);font-size:13px}
+    .question-preview{flex:0 0 100%;max-width:100%;margin:2px 0 6px;padding:8px;background:var(--sel);border-radius:5px}
+    .question-preview p{font-size:12px;color:var(--sub);margin:0 0 4px}
+    .question-preview .body{max-height:min(160px,25dvh);overflow:auto;overscroll-behavior:contain;white-space:pre-wrap;overflow-wrap:anywhere}
+    .result{display:grid;width:100%;border-bottom:1px solid var(--line);gap:2px}.result small,.status{color:var(--sub)}
+    mark{background:var(--sel);color:var(--accent)}.status{font-size:12px;margin:4px 11px;overflow-wrap:anywhere}.status:empty{display:none}
+    .feedback{display:flex;align-items:center;flex-shrink:0}.feedback .status{flex:1}.feedback button{font-size:12px;color:var(--accent);padding:4px 8px}
+    [aria-busy=true]{color:var(--accent)}.frame header,.frame nav,.frame .find,.tools{flex-shrink:0}
+    iframe{width:100%;flex:1;min-height:0;border:0;background:var(--p)}.tools{display:flex;justify-content:flex-end;border-top:1px solid var(--line)}
+    .tools button{color:var(--accent);padding-inline:12px}@media(pointer:coarse){button,.icon{min-height:44px;min-width:44px}.handle{min-width:44px}}
+  `;
+  let path="",view="",tab="outline",find=false,rows=[],limit=64,start=0,turns=[],partial=true,routeEpoch=0,readCtl,jumpCtl,frame,updateTimer,loadedVersion=0;
+  let notice="",readStep=null,compact=false,composing=false,stale=false,changedTimer,manualExpanded=false,revealCurrent=false;
+  let loadBody=async id=>ReaderPageIndex.domBody(id),searchCtl,searchTimer,searchResult,searchHits=[],searchStats,searchQuery="",searchStopped=false;
+  let previewCtl,previewTimer,previewBox,previewOwner,restoringPreview=false;
+  const positions=new Map();
+  const expanded=new Set(),frameBox=make("section","frame"),work=make("div","work"),nav=make("nav"),query=make("input"),finder=make("div","find");
+  const list=make("div","list"),status=make("p","status");status.setAttribute("role","status");
+  const feedback=make("div","feedback"),cancel=button(L("停止","Stop"),()=>cancelWork()),reload=button(L("重新读取","Reload"),()=>{
+    if(find&&searchStopped&&!stale)void runSearch();else void loadRows();
+  });
+  feedback.append(status,cancel,reload);cancel.hidden=reload.hidden=true;
+  const heading=make("header"),modes=make("div","modes"),footer=make("div","tools");
+  const handle=button("",()=>toggle(),"handle");handle.title=L("打开 Chat Reader","Open Chat Reader");handle.setAttribute("aria-label",handle.title);
+  const close=icon("close",L("收起","Collapse"),()=>hide(true));
+  const outlineButton=button(L("当前对话","Current chat"),()=>open("outline")),libraryButton=button(L("Reader 资料库","Reader library"),()=>open("library"));
+  modes.append(outlineButton,libraryButton);heading.append(modes,close);
+  const tabs=[
+    button(L("目录","Outline"),()=>switchList("outline",false)),
+    button(L("附件","Files"),()=>switchList("files",false)),
+    icon("search",L("查找当前对话","Find in current chat"),()=>{switchList(tab,!find);if(find)query.focus();})
+  ];nav.append(...tabs);query.type="search";query.placeholder=L("查找当前对话正文…","Find in this conversation…");
+  query.setAttribute("aria-label",query.placeholder);query.oninput=()=>{if(!composing)queueSearch();};
+  query.oncompositionstart=()=>{composing=true;stopSearch();};query.oncompositionend=()=>{composing=false;queueSearch();};finder.append(query);
+  footer.append(button(L("导入…","Import…"),()=>send("open-center")));
+  work.append(nav,finder,list,feedback);frameBox.append(heading,work,footer);frameBox.hidden=true;
+  frameBox.setAttribute("aria-label",L("Chat Reader 导航","Chat Reader navigation"));frameBox.setAttribute("role","region");
+  shadow.append(style,handle,frameBox);
+  function send(kind,extra={}){return chrome.runtime.sendMessage({kind,path:location.pathname,...extra});}
+  function hide(focus=false){routeEpoch++;readCtl?.abort();readCtl=null;stopPreview();stopSearch();stopJump();frame?.remove();frame=null;frameBox.hidden=true;handle.hidden=false;
+    handle.setAttribute("aria-expanded","false");if(focus)handle.focus({preventScroll:true});}
+  function geometry(state=ReaderPageIndex.layout()){
+    const {height,edge,top:offset}=state;compact=state.compact;
+    const top=Math.max(offset+8,Math.min(offset+height*.23,edge-310));
+    host.style.setProperty("--reader-top",top+"px");host.style.setProperty("--reader-room",Math.max(44,edge-top)+"px");
+  }
+  function listKey(){return find?"find":tab;}
+  function switchList(next,search){
+    positions.set(listKey(),{top:list.scrollTop,limit,start});tab=next;find=search;
+    if(!find)stopSearch();
+    const previous=positions.get(listKey());limit=64;start=previous?.start||0;render();list.scrollTop=previous?.top||0;
+    if(find&&query.value.trim()!==searchQuery)void runSearch();
+  }
+  function paintStatus(){
+    let copy=readCtl?ReaderProgress.describe(readStep,navigator.language.startsWith("zh"))||L("正在读取对话…","Reading conversation…"):notice;
+    if(!readCtl&&!jumpCtl&&!stale&&find&&query.value.trim()===searchQuery&&(!notice||searchCtl||searchStopped)){
+      if(searchCtl)copy=L(`正在查找 · ${searchStats?.scanned||0}/${rows.length} 条消息 · 至少 ${searchStats?.matches||searchHits.length} 处`,
+        `Searching · ${searchStats?.scanned||0}/${rows.length} messages · at least ${searchStats?.matches||searchHits.length} matches`);
+      else if(searchStopped)copy=L(`查找已停止 · 至少 ${searchStats?.matches||searchHits.length} 处匹配`,`Search stopped · at least ${searchStats?.matches||searchHits.length} matches`);
+      else if(searchResult)copy=L(`${searchResult.total} 处匹配`,`${searchResult.total} matches`);
+    }
+    if(partial&&!readCtl)copy+=(copy?" · ":"")+L("部分目录","Partial outline");
+    status.textContent=copy;cancel.hidden=!readCtl&&!jumpCtl&&!searchCtl;reload.hidden=!!readCtl||!!searchCtl||!partial&&!stale&&!searchStopped;
+  }
+  function cancelWork(){
+    const returnFocus=shadow.activeElement===cancel;
+    readCtl?.abort();readCtl=null;stopSearch();stopJump();
+    notice=L("已停止；保留已读取的目录。","Stopped; the available outline is retained.");paintStatus();
+    if(returnFocus)(reload.hidden?close:reload).focus({preventScroll:true});
+  }
+  function stopSearch(){clearTimeout(searchTimer);if(searchCtl)searchStopped=true;searchCtl?.abort();searchCtl=null;}
+  function queueSearch(){
+    stopSearch();searchResult=null;searchHits=[];searchQuery=query.value.trim();searchStats=null;searchStopped=false;render();
+    searchTimer=setTimeout(()=>{void runSearch();},150);
+  }
+  async function runSearch(page=0){
+    stopSearch();const q=query.value.trim(),index=q===searchQuery?searchResult:null,ctl=new AbortController(),n=routeEpoch;
+    searchCtl=ctl;searchStopped=false;searchStats=null;searchQuery=q;searchHits=[];notice="";
+    if(!page)searchResult=null;
+    if(!q){searchCtl=null;render();return;}
+    render();list.scrollTop=0;
+    const current=()=>!ctl.signal.aborted&&n===routeEpoch&&q===query.value.trim();
+    try{
+      const result=await ReaderPageIndex.search(rows,loadBody,q,{signal:ctl.signal,index,page,
+        onProgress:s=>{if(current()){searchStats=s;paintStatus();}},
+        onPage:h=>{if(current()){searchHits=h;render();}}});
+      if(!current())return;searchResult=result;searchHits=result.hits;searchStopped=false;
+    }catch{if(current()){searchStopped=true;notice=L("查找中断，请重试。","Search interrupted. Retry.");}}
+    finally{if(searchCtl===ctl){searchCtl=null;render();}}
+  }
+  function group(){
+    turns=[];for(const row of rows){if(row.role==="user"||!turns.length)turns.push({q:row.role==="user"?row:null,answers:[]});
+      if(row.role!=="user")turns.at(-1).answers.push(row);}
+    const active=ReaderPageIndex.visible(),current=turns.find(t=>t.q?.id===active||t.answers.some(a=>a.id===active));
+    if(current&&!manualExpanded){
+      expanded.clear();expanded.add((current.q||current.answers[0]).id);
+      if(!find&&tab==="outline"&&!positions.has("outline")){
+        // A first open near turn 100 must show that actual reading turn, not
+        // render thousands of earlier rows or leave it beyond a 64-row page.
+        start=Math.max(0,turns.indexOf(current)-12);limit=64;
+        revealCurrent=true;
+      }
+    }
+  }
+  function stopJump(){jumpCtl?.abort();jumpCtl=null;list.querySelectorAll("[aria-busy]").forEach(n=>n.removeAttribute("aria-busy"));}
+  function stopPreview(restoreFocus=false){
+    const owner=previewOwner,box=previewBox,focused=box?.contains(shadow.activeElement);
+    // Chromium dispatches focusout synchronously while a focused subtree is
+    // removed. Drop ownership first so that callback cannot remove it twice.
+    previewOwner=null;previewBox=null;
+    clearTimeout(previewTimer);previewTimer=null;previewCtl?.abort();previewCtl=null;
+    owner?.removeAttribute("aria-describedby");box?.remove();
+    if(restoreFocus&&focused&&owner?.isConnected){restoringPreview=true;owner.focus({preventScroll:true});restoringPreview=false;}
+  }
+  async function questionPreview(row,owner,container){
+    if(previewOwner===owner||!owner.isConnected||stale)return;
+    stopPreview();const ctl=new AbortController(),n=routeEpoch;
+    previewCtl=ctl;previewOwner=owner;previewBox=make("div","question-preview");
+    const label=make("p","",L("正在读取完整提问…","Reading full question…")),body=make("div","body");
+    label.setAttribute("role","status");body.id="reader-full-question";body.tabIndex=0;body.setAttribute("aria-label",L("完整提问","Full question"));
+    previewBox.append(label,body);container.append(previewBox);
+    try{
+      const text=await loadBody(row.id,ctl.signal);
+      if(ctl.signal.aborted||n!==routeEpoch||!owner.isConnected)return;
+      if(typeof text!=="string"||loadedVersion!==ReaderPageIndex.sample())throw Error("preview-changed");
+      label.textContent=L("完整提问","Full question");body.textContent=text;owner.setAttribute("aria-describedby",body.id);
+    }catch{if(!ctl.signal.aborted&&n===routeEpoch)label.textContent=L("完整提问未能读取，可重新聚焦重试。","Full question unavailable. Focus again to retry.");}
+  }
+  function previewQuestion(row,owner,container){
+    // Read one body from the existing provider only on demand. Release both its
+    // text node and pending callback on blur, route changes or page replacement.
+    owner.removeAttribute("title");
+    container.addEventListener("mouseenter",()=>{clearTimeout(previewTimer);previewTimer=setTimeout(()=>questionPreview(row,owner,container),200);});
+    owner.addEventListener("focus",()=>{if(!restoringPreview)void questionPreview(row,owner,container);});
+    const leave=e=>{if(!container.contains(e.relatedTarget)&&!container.contains(shadow.activeElement))stopPreview();};
+    container.addEventListener("mouseleave",leave);
+    container.addEventListener("focusout",e=>{if(!container.contains(e.relatedTarget))stopPreview();});
+  }
+  async function locate(target,owner){
+    stopPreview();stopJump();if(busy()){notice=L("请等待当前保存完成后定位。","Finish the current save before jumping.");paintStatus();return;}
+    if(stale||loadedVersion!==ReaderPageIndex.sample()){
+      stale=partial=true;notice=L("对话已变化，请重新读取目录后定位。","The conversation changed. Reload the outline before jumping.");paintStatus();return;}
+    stopSearch();const ctl=new AbortController();jumpCtl=ctl;owner?.setAttribute("aria-busy","true");notice=L("正在定位…","Locating…");paintStatus();
+    try{const body=target.query?await loadBody(target.id,ctl.signal):undefined;ctl.signal.throwIfAborted();
+      const result=await ReaderPageIndex.jump(rows,target,ctl.signal,p=>{
+        if(!ctl.signal.aborted){notice=L(`正在定位 · 已核对 ${p.probes} 次`, `Locating · ${p.probes} checked positions`);paintStatus();}
+      },body);if(ctl.signal.aborted)return;
+      notice=result.ok?(result.kind==="message-fallback"?L("已定位所属消息；无法确认具体附件。","At the owning message; the exact file could not be verified."):""):
+        L("未能确认原文位置。可重试或重新读取目录。","Location unconfirmed. Retry or reload the outline.");
+      if(result.ok&&compact&&result.kind!=="message-fallback")hide(true);else if(result.ok)activeRow();
+    }catch{if(!ctl.signal.aborted)notice=L("定位中断，可重试。","Location interrupted. Retry.");}
+    finally{owner?.removeAttribute("aria-busy");if(jumpCtl===ctl)jumpCtl=null;paintStatus();}
+  }
+  function activeRow(){
+    if(frameBox.hidden||view!=="outline")return;const id=ReaderPageIndex.visible();
+    list.querySelectorAll("[data-mid]").forEach(n=>{const active=n.dataset.mid===id;n.classList.toggle("active",active);
+      if(active)n.setAttribute("aria-current","location");else n.removeAttribute("aria-current");});
+  }
+  function item(copy,target,cls){
+    const b=button(copy,()=>locate(target,b),cls);b.dataset.mid=target.id;b.title=copy;return b;
+  }
+  function render(){
+    stopPreview();
+    finder.hidden=!find;tabs[0].setAttribute("aria-pressed",String(!find&&tab==="outline"));tabs[1].setAttribute("aria-pressed",String(!find&&tab==="files"));
+    tabs[2].setAttribute("aria-pressed",String(find));const entries=[];
+    if(find){
+      const owners=new Map();for(let i=0;i<turns.length;i++)for(const row of [turns[i].q,...turns[i].answers].filter(Boolean))owners.set(row.id,i+1);
+      for(const hit of searchHits){
+        const b=item("",{id:hit.id,query:searchQuery,occurrence:hit.occurrence},"result"),snippet=make("span");
+        b.dataset.occurrence=String(hit.occurrence);
+        snippet.append(hit.before,make("mark","",hit.match+(hit.truncated?"…":"")),hit.after);
+        const seq=owners.get(hit.id),role=hit.role==="user"?L("提问","Question"):L("回答","Answer");
+        b.append(make("small","",L(`第 ${seq} 轮 · ${role} · 第 ${hit.occurrence+1} 处`,`Turn ${seq} · ${role} · match ${hit.occurrence+1}`)),snippet);entries.push(b);
+      }
+      if(searchResult&&!searchCtl&&!searchStopped){
+        const {page,total}=searchResult,pages=Math.ceil(total/64);
+        if(page)entries.push(button(L("上一页","Previous matches"),()=>runSearch(page-1)));
+        if(page+1<pages)entries.push(button(L("显示更多","Show more"),()=>runSearch(page+1)));
+      }
+      const top=list.scrollTop;list.replaceChildren(...entries);list.scrollTop=top;activeRow();paintStatus();return;
+    }
+    let count=0;const add=el=>{count++;if(count>start&&count<=start+limit)entries.push(el());};
+    for(let i=0;i<turns.length;i++){const t=turns[i],seq=L(`第 ${i+1} 轮`,`Turn ${i+1}`);
+      if(!find&&tab==="outline"){
+        add(()=>{const div=make("div","row"), id=(t.q||t.answers[0]).id;
+          const b=item(t.q?.title||L("回答","Answer"),{id},"entry"),toggle=button(expanded.has(id)?"▾":"▸",()=>{
+            manualExpanded=true;if(expanded.has(id))expanded.delete(id);else expanded.add(id);render();list.querySelector(`[data-fold="${i}"]`)?.focus({preventScroll:true});},"fold");
+          toggle.dataset.fold=String(i);toggle.setAttribute("aria-label",L("回答章节","Answer sections")+" · "+seq);toggle.setAttribute("aria-expanded",String(expanded.has(id)));
+          div.append(toggle,b);if(t.q)previewQuestion(t.q,b,div);return div;});
+        if(expanded.has((t.q||t.answers[0]).id))for(const a of t.answers){if(!a.headings.length)add(()=>item(L("回答","Answer"),{id:a.id},"child"));
+          a.headings.forEach((h,k)=>add(()=>{const b=item(h.text,{id:a.id,heading:k},"child");b.style.paddingInlineStart=(11+Math.min(h.level,5)*5)+"px";return b;}));}
+      }else for(const row of [t.q,...t.answers].filter(Boolean)){
+        const role=seq+" · "+(row.role==="user"?L("提问","Question"):L("回答","Answer"));
+        row.files.forEach((file,k)=>add(()=>{const b=item(file.name||file,{id:row.id,file:k},"result");
+          const type={image:L("图片","Image"),file:L("文件","File"),table:L("表格","Table")}[file.type];
+          b.append(make("small","",role+(type?" · "+type:"")));return b;}));
+      }
+    }
+    if(start>=count&&start){start=Math.max(0,Math.floor((count-1)/64)*64);render();return;}
+    if(start)entries.unshift(button(tab==="outline"?L("查看更早的轮次","Earlier turns"):L("上一页附件","Previous files"),()=>{start=Math.max(0,start-64);render();list.scrollTop=0;}));
+    if(count>start+limit)entries.push(button(tab==="outline"?L("查看后续轮次","Later turns"):L("下一页附件","Next files"),()=>{
+      start+=limit;render();list.scrollTop=0;
+    }));
+    list.replaceChildren(...entries);activeRow();
+    if(revealCurrent&&!find&&tab==="outline"){
+      revealCurrent=false;const active=list.querySelector(".active"),box=list.getBoundingClientRect(),r=active?.getBoundingClientRect();
+      if(r)list.scrollTop+=r.top-box.top-Math.min(80,box.height/3);
+    }
+    if(!jumpCtl)notice=!count?L("没有匹配项目。","No matching items."):"";
+    paintStatus();
+  }
+  async function loadRows(){
+    if(frameBox.hidden||view!=="outline")return;
+    readCtl?.abort();stopPreview();stopSearch();stopJump();const ctl=new AbortController();readCtl=ctl;readStep=null;stale=false;
+    searchResult=null;searchHits=[];searchQuery="";searchStopped=false;
+    rows=ReaderPageIndex.domRows().map(ReaderPageIndex.metadata);loadBody=async id=>ReaderPageIndex.domBody(id);
+    loadedVersion=ReaderPageIndex.sample();partial=true;group();render();
+    const n=routeEpoch;
+    try{
+      const data=await read(ctl,step=>{if(!ctl.signal.aborted&&n===routeEpoch){readStep=ReaderProgress.snapshot(step);paintStatus();}});
+      if(ctl.signal.aborted||n!==routeEpoch)return;
+      if(typeof data.loadBody!=="function")throw Error("Navigation body provider unavailable.");
+      rows=data.rows.map(ReaderPageIndex.metadata);loadBody=data.loadBody;partial=!data.complete;loadedVersion=ReaderPageIndex.sample();group();render();
+    }catch{if(!ctl.signal.aborted&&n===routeEpoch){partial=true;notice=L("完整目录未读取，可重试。","The full outline could not be read. Retry.");}}
+    finally{if(readCtl===ctl){readCtl=null;if(find&&query.value.trim())void runSearch();else paintStatus();}}
+  }
+  async function open(want,remember=true){
+    if(!ReaderRoutes.eligible(location.pathname))return;
+    const n=++routeEpoch;readCtl?.abort();readCtl=null;stopPreview();stopSearch();stopJump();frame?.remove();frame=null;
+    view=ReaderRoutes.chat(location.pathname)?want:"library";outlineButton.hidden=!ReaderRoutes.chat(location.pathname);
+    if(remember&&ReaderRoutes.chat(location.pathname))void send("surface-tab",{view});
+    frameBox.hidden=false;handle.hidden=true;handle.setAttribute("aria-expanded","true");geometry();close.focus({preventScroll:true});
+    outlineButton.setAttribute("aria-pressed",String(view==="outline"));libraryButton.setAttribute("aria-pressed",String(view==="library"));
+    work.hidden=view!=="outline";footer.hidden=view==="library";
+    globalThis.ReaderCloseSaveMenu?.();
+    if(view==="library"){
+      const result=await send("frame-ticket");if(n!==routeEpoch)return;
+      if(!result?.ticket){work.hidden=false;status.textContent=L("资料库未打开，请收起后重试。","Library unavailable. Reopen to retry.");return;}
+      frame=make("iframe");frame.title=L("Reader 资料库","Reader library");frame.referrerPolicy="no-referrer";frame.src=chrome.runtime.getURL("frame.html")+"#"+result.ticket;
+      frameBox.insertBefore(frame,footer);return;
+    }
+    if(rows.length&&!stale&&loadedVersion===ReaderPageIndex.sample()){render();if(!partial)return;}
+    await loadRows();
+  }
+  async function toggle(){if(!frameBox.hidden){hide(true);return;}const r=await send("surface-tab");await open(r?.view==="library"?"library":"outline",false);}
+  function mount(){
+    const p=location.pathname;if(p!==path){path=p;hide();rows=[];turns=[];loadBody=async id=>ReaderPageIndex.domBody(id);searchResult=null;searchHits=[];searchQuery="";
+      expanded.clear();manualExpanded=false;positions.clear();query.value="";find=false;tab="outline";start=0;limit=64;stale=false;
+      if(!ReaderRoutes.eligible(p)){host.remove();return;}}
+    if(ReaderRoutes.eligible(p)&&!host.isConnected){document.body?.append(host);geometry();}
+  }
+  globalThis.ReaderOpenLibrary=()=>open("library");globalThis.ReaderCloseOverlay=()=>hide();
+  shadow.addEventListener("keydown",e=>{if(e.key==="Escape"){e.preventDefault();e.stopPropagation();
+      if(jumpCtl||readCtl||searchCtl)cancelWork();else if(previewBox)stopPreview(true);else if(find){switchList(tab,false);tabs[2].focus({preventScroll:true});}else hide(true);}});
+  const userMove=e=>{if(e.isTrusted&&!e.composedPath().includes(host)&&(!e.key||["PageUp","PageDown","Home","End","ArrowUp","ArrowDown"," "].includes(e.key))&&jumpCtl){
+      stopJump();notice=L("已停止定位，保留当前位置。","Jump stopped. Your reading position is retained.");paintStatus();}};
+  for(const event of ["wheel","touchstart","pointerdown","keydown"])document.addEventListener(event,userMove,{capture:true,passive:true});
+  // Background tabs cannot truthfully confirm a visible destination. Do not
+  // resume an abandoned jump or a read when this document is shown again.
+  document.addEventListener("visibilitychange",()=>{if(document.hidden){stopPreview();if(jumpCtl||readCtl||searchCtl)cancelWork();}});
+  addEventListener("pagehide",()=>{readCtl?.abort();readCtl=null;stopPreview();stopSearch();stopJump();});
+  ReaderPageIndex.observeLayout(geometry);
+  addEventListener("scroll",()=>{if(frameBox.hidden||view!=="outline"||updateTimer)return;
+    updateTimer=setTimeout(()=>{updateTimer=null;activeRow();},90);},{capture:true,passive:true});
+  new MutationObserver(changes=>{
+    if(path!==location.pathname||!host.isConnected&&ReaderRoutes.eligible(path))mount();
+    if(frameBox.hidden||view!=="outline"||!changes.some(c=>c.target.closest?.("[data-message-id],[data-current-node-id]")||
+      [...c.addedNodes,...c.removedNodes].some(n=>n.matches?.("[data-message-id],[data-current-node-id]")||n.querySelector?.("[data-message-id]"))))return;
+    clearTimeout(changedTimer);changedTimer=setTimeout(()=>{
+      if(frameBox.hidden||view!=="outline"||loadedVersion===ReaderPageIndex.sample())return;
+      readCtl?.abort();readCtl=null;stopPreview();stopSearch();stopJump();stale=partial=true;
+      notice=L("对话已变化，请重新读取目录。","The conversation changed. Reload the outline.");paintStatus();
+    },160);
+  }).observe(document.documentElement,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:["data-current-node-id","data-talvt-turn-state"]});
+  addEventListener("popstate",mount);addEventListener("pageshow",mount);
+  chrome.runtime.onMessage.addListener((m,s,reply)=>{if(s.id!==chrome.runtime.id||s.tab)return;
+    if(m?.kind==="reader-toggle"){mount();void toggle();reply({ok:true});}
+    if(m?.kind==="reader-collapse"){hide(true);reply({ok:true});}
+    if(m?.kind==="reader-surface-path")reply({current:ReaderRoutes.eligible(location.pathname)&&location.pathname===m.path});
+  });mount();
+};

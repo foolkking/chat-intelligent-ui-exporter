@@ -15,7 +15,7 @@ function rememberFind(s,device,key){
   if(manualFinds.size>=12)manualFinds.delete(manualFinds.keys().next().value);
   manualFinds.set(s.tab.id,{device,doc:s.documentId,key});
 }
-const pendingSave=j=>j&&(j.active||["review","upload-unknown","check","reconnect"].includes(j.phase));
+const pendingSave=j=>j&&(j.active||j.packageReady||["review","upload-unknown","check","reconnect"].includes(j.phase));
 function sourceDisplay(j,attempt){
   if(!j)return "save";
   if(j.phase==="done"){
@@ -24,6 +24,7 @@ function sourceDisplay(j,attempt){
     return j.result.action==="separate_copy"?"copy":"saved";
   }
   if(j.phase==="review")return "review";
+  if(j.packageReady&&!j.active)return "paused";
   if(j.phase==="upload-unknown"||j.phase==="check")return "uncertain";
   if(j.active)return "saving";
   if(j.phase==="reconnect")return "reconnect";
@@ -65,7 +66,8 @@ async function act(m,s,path,host){
       if(!await stillHere(s,path,device.id))return {error:"changed"};
       state="previous";
     }
-    return {state,name:dest?.showName?String(dest.name||"").slice(0,120):"",canSave:!!dest};
+    return {state,name:dest?.showName?String(dest.name||"").slice(0,120):"",canSave:!!dest,
+      ...(j?.active&&["reading","uploading"].includes(j.phase)?{step:ReaderProgress.snapshot(j.step)}:{})};
   }
   if(m.kind==="open-saved"||m.kind==="find-saved"){
     let cid;
@@ -106,6 +108,7 @@ async function act(m,s,path,host){
     }
     const c=await api("capabilities");
     if(c.protocol!==1||c.import_profile!=="reader-chat-v1"||!c.capture||excerpt&&!c.selective_append)return {error:"unavailable"};
+    if(c.resumable_capture!==true)return {state:"upgrade-required"};
     if(!excerpt&&dest.project&&!(await api("projects")).some(p=>p.id===dest.project&&!p.default)){
       await chrome.storage.local.remove("destination");return {state:"destination"};
     }
@@ -113,7 +116,7 @@ async function act(m,s,path,host){
     const ticket=crypto.randomUUID(),attempt=crypto.randomUUID();
     await chrome.storage.session.set({["ticket:"+ticket]:{tab:s.tab.id,doc:s.documentId,path,device:device.id,
       project:excerpt?null:dest.project||null,mode:excerpt?"append":"save",sourceKey:key,attempt,expires:Date.now()+30000}});
-    return {ticket,attempt};
+    return {ticket,attempt,textOnly:!excerpt&&!!dest.textOnly};
   });
 }
 globalThis.ReaderSourceAction=act;

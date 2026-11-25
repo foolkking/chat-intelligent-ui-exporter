@@ -14,7 +14,7 @@ test("the CI reference and private installer are independent of Git checkout lin
   const t=fs.mkdtempSync(path.join(os.tmpdir(),"reader-lines-")),original=build(root,path.join(t,"original"),reference);
   const members=Object.keys(unzipSync(original.bytes)).filter(n=>!["config.js","manifest.json"].includes(n));
   const inputs=["scripts/package-reader.cjs","reader/public-key.txt",...members.map(n=>n==="LICENSE"?n:
-    (/^(?:icons\/|licenses\/|locales\/|THIRD_PARTY_NOTICES\.md$|fast-text\.js$|i18n\.js$)/.test(n)?"extension/":"reader/")+n)];
+    (/^(?:licenses\/|locales\/|THIRD_PARTY_NOTICES\.md$|fast-text\.js$|i18n\.js$)/.test(n)?"extension/":"reader/")+n)];
   const results=["lf","crlf"].map(mode=>{
     const src=path.join(t,mode);
     for(const rel of inputs){const dest=path.join(src,rel),raw=fs.readFileSync(path.join(root,rel));
@@ -25,7 +25,11 @@ test("the CI reference and private installer are independent of Git checkout lin
   });
   for(let i=0;i<2;i++)assert.ok(results[0][i].bytes.equals(results[1][i].bytes),"checkout changed ZIP bytes");
   assert.ok(original.bytes.equals(results[0][0].bytes));
-  assert.ok(Buffer.from(unzipSync(original.bytes)["icons/icon128.png"]).equals(fs.readFileSync(path.join(root,"extension/icons/icon128.png"))));
+  const packed=unzipSync(original.bytes);
+  assert.equal(JSON.parse(Buffer.from(packed["manifest.json"])).version,"0.3.0");
+  assert.ok(packed["center-selection.js"],"The actual selection model must be in both checkout variants.");
+  for(const size of [16,32,48,128])
+    assert.ok(Buffer.from(unzipSync(original.bytes)[`icons/icon${size}.png`]).equals(fs.readFileSync(path.join(root,`reader/icons/icon${size}.png`))));
 });
 test("verify private binding against a pinned neutral ZIP checksum, not a self-declared program hash",()=>{
   const {verify}=require("../scripts/verify-reader-distribution.cjs");

@@ -6,6 +6,7 @@ function policyText(p){
     L("可含个人批注和笔记","May include personal notes")].join(" · ");
 }
 function jobLabel(j){
+  if(j.active&&["reading","uploading"].includes(j.phase)&&j.step)return ReaderProgress.describe(j.step,zh);
   const r=j.result;
   if(j.mode==="append"&&j.phase==="append-ready")return L("所选消息已接收 · 等待确认追加","Selected messages received · review append");
   if(j.mode==="append"&&j.phase==="append-complete")return L("追加已处理","Append processed");
@@ -20,14 +21,18 @@ function jobLabel(j){
   return {reading:L("正在读取当前对话","Reading conversation"),uploading:L("正在上传","Uploading"),received:L("已接收，等待处理","Received · waiting"),
     processing:L("正在保存…","Saving…"),queued:L("正在保存…","Saving…"),"resource-wait":L("已接收，等待可用内存","Received · waiting for memory"),
     review:L("保存前需确认","Review before saving"),"capture-interrupted":L("读取中断，未发送","Capture interrupted · not sent"),
-    "storage-full":L("临时空间不足，未发送","Storage full · not sent"),"capture-limit":L("超过单次采集上限，未发送","Capture limit exceeded · not sent"),"upload-unknown":L("上传结果待核对","Upload receipt unconfirmed"),
+    "storage-full":L("临时空间不足，未发送","Storage full · not sent"),"capture-limit":L("旧版采集限制，请更新插件后重试","Previous capture limit · update the extension and retry"),"upload-unknown":L("上传结果待核对","Upload receipt unconfirmed"),
+    "upload-paused":L("上传暂停，可以继续","Upload paused · resume available"),
+    "instance-limit":L("超过此 Reader 的导入配额","Reader import allowance exceeded"),
+    "server-storage":L("Reader 空间不足，导入包已保留","Reader storage full · package retained"),
+    "other-transfer":L("请先继续或取消上一项上传","Resume or cancel the previous upload first"),
     "upload-rejected":L("上传被拒绝，未导入","Upload rejected · not saved"),reconnect:L("请重新连接 Reader","Reconnect to Reader"),
     attention:L("需要检查导入任务","Import needs attention"),cancelled:L("任务已取消","Import cancelled"),
     "result-unavailable":L("已处理，原对话不可用","Processed · conversation unavailable"),check:L("状态待核对","Status unconfirmed")}[j.phase]||L("等待处理","Pending");
 }
 function incomplete(j){return j.result?.completeness==="partial"||j.partial||Object.values(j.losses||{}).some(Number);}
 function warn(j){return incomplete(j)||!!j.review||!j.active&&!["done","cancelled","append-ready","append-complete"].includes(j.phase);}
-const mustResolve=j=>j.active||!!j.review||["check","reconnect","upload-unknown"].includes(j.phase);
+const mustResolve=j=>j.active||j.packageReady||!!j.review||["check","reconnect","upload-unknown"].includes(j.phase);
 function boxFor(copy,iconName,warning,key){
   const box=node("details","job"),sum=node("summary"),body=node("div","job-body");box.dataset.key=key;box.dataset.tone=warning?"warning":"plain";
   sum.append(glyph(iconName),node("span","",copy),glyph("chevron"));box.append(sum,body);return {box,body};
@@ -40,6 +45,11 @@ function lossText(loss){
 function taskBox(j){
   const r=j.result,current=r?.current_project,where=current?projectName(current):"";
   const {box,body}=boxFor(jobLabel(j)+(where?" · "+where:""),warn(j)?"warning":j.phase==="done"?"ok":"clock",warn(j),j.key);
+  if(j.packageReady&&!j.active){
+    body.append(node("p","",L("原导入包保留在本机；继续时先核对收据，不重复读取或新建对话。","The package is retained locally. Resume checks its receipt first; it does not recapture or create another conversation.")));
+    body.append(btn(L("继续上传","Resume upload"),()=>cmd({op:"check",key:j.key})),
+      btn(L("取消未接收的上传","Cancel unreceived upload"),()=>cmd({op:"discard",key:j.key})));
+  }else
   if(j.mode==="append"&&uuid(j.iid)&&["append-ready","append-attention","append-complete"].includes(j.phase)){
     body.append(btn(j.phase==="append-complete"?L("查看追加结果","View append result"):L("在 Reader 核对","Review in Reader"),async()=>{
       await session();const {jobs=[],device:current}=await storage.get(["jobs","device"]);
@@ -68,11 +78,11 @@ function taskBox(j){
       ()=>cmd({op:"check",key:j.key,decision:{receipt:v.receipt,accept_partial:v.partial,accept_share:v.live_share,separate:v.action==="conflict"}})));
   }else if(["storage-full","capture-interrupted","upload-rejected","capture-limit"].includes(j.phase)){
     body.append(node("p","",j.phase==="storage-full"?L("释放浏览器临时空间后，从原对话重试。","Free temporary browser space, then retry from the source."):
-      j.phase==="capture-limit"?L("未发送此版本。请在 Reader 手动导入来源文件。","This version was not sent. Import the source file in Reader."):
+      j.phase==="capture-limit"?L("这是旧版插件留下的失败记录，内容未发送。更新 Reader 和插件后，可回原对话重新保存。","This is a previous extension failure; no content was sent. Update Reader and the extension, then save again from the conversation."):
       L("没有保存此版本。请核对来源和目标后，从原对话重试。","This version was not saved. Check the source and destination before retrying.")));
   }else if(j.phase==="reconnect"){body.append(btn(L("打开设置","Open settings"),()=>{if(!$("settings").open)settings($("settings-label"));}));}
   else if(!j.active&&!["cancelled","result-unavailable"].includes(j.phase)){body.append(btn(L("检查原收据","Check original receipt"),()=>cmd({op:"check",key:j.key})));}
-  else if(j.active){body.append(node("p","",j.phase==="reading"?L("请保留来源标签页，直到 Reader 接收。","Keep the source tab open until Reader receives the import."):L("可以关闭侧栏，已接收的任务会继续。","You can close the panel; received work continues in Reader.")));}
+  else if(j.active){body.append(node("p","",j.phase==="reading"?L("请保留来源标签页，正在读取正文和附件。","Keep the source tab open while messages and files are read."):L("可以关闭资料库，任务会继续。","You can close the library; the task continues.")));}
   if(warn(j)&&!mustResolve(j))body.append(btn(L("收起提醒","Dismiss notice"),async()=>{
     await session();const {seenWarnings=[]}=await storage.get("seenWarnings");
     await storage.set({seenWarnings:[...seenWarnings.filter(k=>k!==j.key),j.key].slice(-16)});
@@ -83,7 +93,13 @@ function taskBox(j){
 function exportBox(ex){
   const {box,body}=boxFor(ex.aid?L("上下文包已生成","Context package ready"):L("正在生成上下文包","Preparing context package"),"download",false,"export");
   if(ex.policy)body.append(node("p","",policyText(ex.policy)));
-  if(ex.aid)body.append(btn(L("下载 .context.zip","Download .context.zip"),()=>download(ex.aid)));
+  if(ex.aid){
+    const d=ex.delivery;
+    if(d)body.append(node("p","",L(`实际附件文件 ${d.files} 个`,`${d.files} files included`)+(d.partial?L("（部分未包含）"," (some not included)"):"")+" · "+
+      ([d.current?"Current":"",d.index?"Index":""].filter(Boolean).join(" + ")||(d.continuation==="unavailable"?L("交接文件不可用","Handoff unavailable"):L("未含交接文件","No handoff files")))));
+    body.append(btn(L("下载上下文包","Download context package"),()=>download(ex.aid)));
+    if(caps.context_settings)body.append(btn(L("下载接续 Skill","Download acquisition Skill"),()=>cmd({op:"skill",aid:ex.aid,locale:zh?"zh-CN":"en"})));
+  }
   else if(!ex.id)body.append(btn(L("核对导出请求","Check export request"),()=>startExport(ex.cid)));
   body.append(btn(L("收起","Dismiss"),()=>storage.remove("exportJob")));return box;
 }

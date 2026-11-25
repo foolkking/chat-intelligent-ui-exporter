@@ -5,14 +5,23 @@ const node=(tag,cls,txt)=>{const x=document.createElement(tag);if(cls)x.classNam
 const label=(el,copy)=>{el.title=copy;el.setAttribute("aria-label",copy);};
 const icon=(el,name,copy)=>{el.replaceChildren(glyph(name));label(el,copy);};
 const opt=(value,title)=>new Option(title,value);
-let device,projects=[],caps={},epoch=0,next=0,timer,composing=false,menuOwner,settingsOwner,historyOwner;
+let device,projects=[],caps={},epoch=0,next=0,timer,composing=false,menuOwner,settingsOwner,historyOwner,catalogController;
 const pendingRows=new Set();
 const setText=(id,cn,en)=>$(id).textContent=L(cn,en);
 document.documentElement.lang=zh?"zh-CN":"en";
 document.querySelectorAll("[data-glyph]").forEach(x=>x.append(glyph(x.dataset.glyph)));
 icon($("settings-label"),"settings",L("设置","Settings"));icon($("find"),"search",L("搜索","Search"));
 document.querySelectorAll(".dismiss").forEach(b=>{icon(b,"close",L("关闭","Close"));b.onclick=()=>b.closest("dialog").close();});
-setText("connect","登录并连接 Reader","Connect to Reader");setText("settings-heading","设置","Settings");
+setText("connect","连接 Reader","Connect to Reader");setText("settings-heading","设置","Settings");
+setText("auth-heading","连接与授权","Connection and access");setText("import-heading","导入到 Reader","Save to Reader");
+setText("ai-heading","交给 AI","For AI");setText("ai-files-copy","包含可导出的附件原文件","Include available original files");
+setText("ai-handoff-copy","包含已保存的 Current 和 Index","Include available Current and Index");setText("ai-save","保存账号预设","Save account preset");
+setText("text-only-copy","仅保存正文（不下载附件）","Save text only (do not download files)");
+setText("manage-devices","管理已授权设备","Manage authorized devices");setText("pair-reader","在 Reader 核对并授权","Review in Reader");
+$("manage-devices").href=$("pair-reader").href=READER_ORIGIN+"/extension/devices";
+setText("pair-help","在 Reader 的账号安全 → 浏览器插件中输入短码。10 分钟有效。","Enter the code in Reader → Account security → Browser extensions. Valid for 10 minutes.");
+setText("pair-cancel","取消配对","Cancel pairing");setText("import-center","导入","Import");
+$("import-center").onclick=()=>chrome.runtime.sendMessage({kind:"open-center"});
 setText("history-heading","最近任务","Recent tasks");setText("history-link","最近任务","Recent tasks");
 setText("disconnect","断开此设备","Disconnect this device");setText("target-label","新对话保存到","Save new conversations to");
 setText("share-label-copy","在 ChatGPT 页内显示此项目名称","Show this project name on the ChatGPT page");
@@ -20,7 +29,7 @@ setText("source-lookup-copy","打开 ChatGPT 对话时，将当前对话标识�
 setText("choose","确认","Confirm");setText("destination-needed","选择新对话的保存位置","Choose where new conversations are saved");
 setText("boot-retry","重新读取资料","Retry loading library");
 setText("more","加载更多","Load more");$("instance").textContent=READER_ORIGIN;
-$("q").placeholder=L("搜索对话…","Search conversations…");$("q").setAttribute("aria-label",$("q").placeholder);
+$("q").placeholder=L("搜索对话标题或项目名…","Search titles or projects…");$("q").setAttribute("aria-label",$("q").placeholder);
 $("view").setAttribute("aria-label",L("对话视图","Conversation view"));$("filter").setAttribute("aria-label",L("项目筛选","Project filter"));
 $("jobs").setAttribute("aria-label",L("任务状态","Task status"));$("row-menu").setAttribute("aria-label",L("对话操作","Conversation actions"));
 const announce=message=>{$("announcer").textContent=message;};
@@ -105,7 +114,7 @@ function openMenu(item,b){
   const m=$("row-menu");if(m.matches(":popover-open")&&menuOwner===b){closeMenu(true);return;}
   closeMenu();menuOwner=b;m.replaceChildren();b.setAttribute("aria-expanded","true");
   const cid=item.id,pid=uuid($("filter").value)?$("filter").value:null;
-  const exp=menuRow(L("导出上下文 .context.zip","Export context .context.zip"),"download",()=>{closeMenu(true);return startExport(cid);});
+  const exp=menuRow(L("交给 AI · .context.zip","For AI · .context.zip"),"download",()=>{closeMenu(true);return startExport(cid);});
   m.append(exp);const note=node("small","menu-note");m.append(note);
   if(caps.save_receipts)json("context/options").then(s=>{if(note.isConnected){note.textContent=policyText(s);positionMenu();}}).catch(()=>{});
   if(typeof item.pinned==="boolean"){
@@ -150,9 +159,15 @@ function emptyActions(q,filter,view){
 async function load(reset){
   if($("library").hidden)return;
   clearTimeout(timer);const n=++epoch,q=$("q").value.trim(),filter=$("filter").value,view=$("view").value||"library",params=new URLSearchParams({offset:String(reset?0:next)});
+  catalogController?.abort();catalogController=new AbortController();
+  if(q&&!caps.catalog_names){
+    $("rows").replaceChildren();$("recover").replaceChildren();$("more").hidden=true;$("rows").removeAttribute("aria-busy");
+    $("status").textContent=L("请升级 Reader 以搜索对话标题和项目名。","Update Reader to search titles and project names.");return;
+  }
+  if(caps.catalog_names)params.set("match","names");
   if(caps.catalog_details)params.set("view",view);if(q)params.set("q",q);if(uuid(filter))params.set("project_id",filter);else if(filter==="unclassified")params.set("scope",filter);
   if(reset){closeMenu();$("rows").replaceChildren();next=0;}$("more").hidden=true;$("recover").replaceChildren();$("rows").setAttribute("aria-busy","true");$("status").textContent=L("正在读取…","Loading…");
-  try{const s=await json("conversations?"+params);if(n!==epoch)return;await session();if(n!==epoch)return;
+  try{const s=await json("conversations?"+params,{signal:catalogController.signal});if(n!==epoch)return;await session();if(n!==epoch)return;
     const first=$("view").options[0];first.textContent=q?L("搜索结果","Search results"):!caps.catalog_details?L("对话","Conversations"):s.listing==="updated"?L("最近更新","Recently updated"):L("最近的对话","Recent conversations");
     $("rows").append(...s.items.map(row));next+=s.items.length;$("more").hidden=!s.has_more;
     $("status").textContent=next?"":q?L("没有匹配的对话。","No matching conversations."):view==="pinned"?L("此范围内没有置顶对话。","No pinned conversations in this scope."):L("此处还没有对话。","No conversations here yet.");
@@ -160,7 +175,16 @@ async function load(reset){
   }catch(e){if(n!==epoch)return;$("status").textContent=problem(e);$("recover").append(btn(L("重试","Retry"),()=>load(reset),"text-action"));}
   finally{if(n===epoch)$("rows").removeAttribute("aria-busy");}
 }
-function settings(b){settingsOwner=b;if(!$("settings").open)$("settings").showModal();focus(!$("dest").hidden&&!$("target").disabled?$("target"):$("history-link"));}
+let options;
+async function readOptions(){if(!device||!caps.context_settings)return;
+  const v=await json("context/options");await session();options=v;$("ai-options").hidden=false;
+  $("ai-files").checked=v.attachments==="include";$("ai-handoff").checked=v.continuation==="auto";}
+$("ai-save").onclick=()=>run($("ai-save"),async()=>{if(!options)return;
+  const body={preset_id:options.preset_id,revision:options.revision,include_attachments:$("ai-files").checked,include_continuation:$("ai-handoff").checked};
+  try{options=await json("context/options",ReaderClient.json("PUT",body));$("ai-status").textContent=L("已保存","Saved");}
+  catch(e){await readOptions();throw e;}
+});
+function settings(b){settingsOwner=b;if(!$("settings").open)$("settings").showModal();focus(!$("dest").hidden&&!$("target").disabled?$("target"):$("history-link"));readOptions().catch(showError);}
 $("settings-label").onclick=()=>settings($("settings-label"));$("destination-needed").onclick=()=>settings($("destination-needed"));
 function restoreDialogOwner(dialog,opener){
   // Native close may already have restored the opener. A queued `close` must
@@ -176,7 +200,7 @@ async function init(retry=false){
   const retryButton=$("boot-retry");
   try{
   await ReaderClient.trust;({device}=await storage.get("device"));$("pair").hidden=!!device;$("settings-label").hidden=!device;
-  $("boot").hidden=!device;$("library").hidden=$("dest").hidden=$("choose").disabled=true;if(!device)return;
+  $("boot").hidden=!device;$("library").hidden=$("dest").hidden=$("choose").disabled=true;if(!device){await showPair("status");return;}
   $("identity").textContent=device.name+" · "+READER_ORIGIN;
   $("boot-status").textContent=L("正在读取资料…","Loading library…");
   const available=await json("capabilities"),scopes=await json("projects");await session();
@@ -185,7 +209,7 @@ async function init(retry=false){
   if(caps.catalog_details)$("view").append(opt("pinned",L("已置顶","Pinned")));
   const {destination:d,sourceLookupDevice}=await storage.get(["destination","sourceLookupDevice"]);const valid=d?.device===device.id&&[...$("target").options].some(o=>o.value===(d.project||""));
   $("source-lookup-setting").hidden=caps.source_lookup!==true;$("source-lookup").checked=sourceLookupDevice===device.id;
-  if(valid){$("target").value=d.project||"";$("share-label").checked=!!d.showName;}else if(d)await storage.remove("destination");
+  if(valid){$("target").value=d.project||"";$("share-label").checked=!!d.showName;$("text-only").checked=!!d.textOnly;}else if(d)await storage.remove("destination");
   $("destination-needed").hidden=valid||!caps.capture;
   if(!caps.capture)$("target-label").textContent=L("此实例未启用网页保存。资料浏览和导出仍可用。","Web capture is unavailable. Browsing and export are still available.");
   $("choose").disabled=$("target").disabled=!caps.capture;
@@ -211,12 +235,21 @@ $("source-lookup").onchange=async e=>{
   }catch(e){box.checked=!enabled;showError(e);}finally{box.disabled=false;}
 };
 $("dest").onsubmit=e=>{e.preventDefault();run($("choose"),async()=>{await session();const project=$("target").value||null;
-  await storage.set({destination:{device:device.id,project,showName:$("share-label").checked,name:$("target").selectedOptions[0].text}});
+  await storage.set({destination:{device:device.id,project,textOnly:$("text-only").checked,showName:$("share-label").checked,name:$("target").selectedOptions[0].text}});
   $("destination-needed").hidden=true;$("settings").close();announce(L("保存位置已更新。","Save destination updated."));});};
-$("connect").onclick=()=>run($("connect"),async()=>{try{await ReaderClient.connect();}catch(e){if(!e.status&&!/cancel|canceled|取消/i.test(e.message))throw Error(L("无法完成授权。请核对 Reader 地址、支持插件的版本及设备开关。","Authorization did not complete. Check the Reader address, extension support and device policy."));throw e;}await init();});
+let pairClock;
+async function showPair(action){
+  clearTimeout(pairClock);let p;
+  try{p=await ReaderClient.pair(action);}catch(e){if(action==="poll")pairClock=setTimeout(()=>showPair("poll").catch(showError),6000);throw e;}
+  if(p?.connected){await init();return;}
+  $("pair-info").hidden=!p;$("connect").hidden=!!p;$("short-code").textContent=p?.code||"";
+  if(p)pairClock=setTimeout(()=>showPair("poll").catch(showError),5300);
+  else if(action==="poll")$("error").textContent=L("短码已失效。请重新连接。","The code expired. Connect again.");
+}
+$("connect").onclick=()=>run($("connect"),()=>showPair("start"));$("pair-cancel").onclick=()=>run($("pair-cancel"),()=>showPair("cancel"));
 $("disconnect").onclick=()=>run($("disconnect"),async()=>{await ReaderClient.disconnect();location.reload();});
-$("q").oncompositionstart=()=>{composing=true;clearTimeout(timer);};$("q").oncompositionend=()=>{composing=false;schedule();};
-function schedule(){if(composing)return;clearTimeout(timer);epoch++;timer=setTimeout(()=>load(true),180);}
+$("q").oncompositionstart=()=>{composing=true;clearTimeout(timer);epoch++;catalogController?.abort();};$("q").oncompositionend=()=>{composing=false;schedule();};
+function schedule(){if(composing)return;clearTimeout(timer);epoch++;catalogController?.abort();timer=setTimeout(()=>load(true),180);}
 $("q").oninput=schedule;$("search").onsubmit=e=>{e.preventDefault();if(!composing)load(true);};
 $("filter").onchange=$("view").onchange=()=>load(true);$("more").onclick=()=>run($("more"),()=>load(false));
 chrome.storage.onChanged.addListener((c,area)=>{if(area!=="local")return;if(c.device&&device&&c.device.newValue?.id!==device.id){location.reload();return;}

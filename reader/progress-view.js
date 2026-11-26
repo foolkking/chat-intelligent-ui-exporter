@@ -70,10 +70,15 @@ globalThis.ReaderProgressView = ({zh=false}={}) => {
       mapping:["匹配数据","Map data"],normalization:["规范化内容","Normalize content"],validation:["验证内容","Validate content"],server:["服务端处理","Server processing"]};
     failureStage.hidden=!(stopped&&reason?.stage&&stages[reason.stage]);
     failureStage.textContent=failureStage.hidden?"":L("停止阶段：","Stopped at: ")+L(...stages[reason.stage]);
+    const reasons={SOURCE_FORMAT_INVALID:["来源格式无法识别","Unrecognized source format"],SOURCE_PAGE_INVALID:["分页信息无效","Invalid history page"],
+      SOURCE_PAGE_CHANGED:["重叠分页记录不一致","Overlapping history records differ"],SOURCE_BRANCH_UNVERIFIED:["无法确认当前分支","Branch not verified"],
+      SOURCE_ATTACHMENT_FAILED:["附件读取失败","File read failed"],SOURCE_HTTP_FAILED:["来源请求失败","Source request failed"],NETWORK_UNAVAILABLE:["网络中断","Network interrupted"]};
+    if(!failureStage.hidden&&Object.hasOwn(reasons,reason.code))failureStage.textContent+=" · "+L(...reasons[reason.code]);
     recovery.textContent=stopped&&reason?.recovery?({
       system_support:L("系统处理异常。请保留原任务；重复提交同一个包不能解决问题，可复制诊断供修复。",
         "A system processing issue needs repair. Keep the original task; resubmitting the same archive will not fix it. Diagnostics are available to copy."),
       retry_existing:L("可继续原任务，系统会先核对已有收据。","Resume the original task; Reader checks its existing receipt first."),
+      check_source:L("尚未交给 Reader。请核对原对话和分支，再决定是否重新读取。","Not handed to Reader. Check the source conversation and branch before starting another capture."),
       free_storage:L("可用空间不足。释放空间后再继续原任务。","Storage is insufficient. Free space before resuming the original task."),
       reconnect:L("请重新连接 Reader 后核对原任务。","Reconnect to Reader, then check the original task."),
       review_in_reader:L("请在 Reader 中核对原任务和追加目标。","Review the original task and append destination in Reader.")

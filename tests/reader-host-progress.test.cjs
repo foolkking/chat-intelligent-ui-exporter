@@ -9,13 +9,13 @@ const stats={sourceBytes:70,sourcePages:2,indexedNodes:4,messageCount:2,textByte
 const turn=()=>new Promise(r=>setImmediate(r));
 
 async function environment({accepted=false,patch={},response,server={status:"processing",progress:25},batchPlan=null}={}){
-  const body=new Blob(["zip"]),calls=[],listeners=[],writes=[],directories=new Set([key]);
+  const body=new Blob(["zip"]),calls=[],listeners=[],writes=[],directories=new Set([key]);let connect;
   let current=device,jobs=[{key,device,batch,sourceKey:"synthetic",phase:"uploading",active:true,packageReady:true,
     binding:{size:3,sha256:"a".repeat(64),project:null,excerpt:false},mode:"save",
     stats:structuredClone(stats),step:{stage:"package",done:3,packageBytes:3},startedAt:1234,finishedAt:null,...patch}];
   const root={async *[Symbol.asyncIterator](){for(const name of directories)yield [name,{}];},
     async removeEntry(name){directories.delete(name);},
-    async getDirectoryHandle(name){if(!directories.has(name))throw Object.assign(Error("synthetic missing file"),{name:"NotFoundError"});
+    async getDirectoryHandle(name,options){if(options?.create)directories.add(name);if(!directories.has(name))throw Object.assign(Error("synthetic missing file"),{name:"NotFoundError"});
       return {async getFileHandle(){return {async getFile(){return body;}};}};}};
   const tails=new Map(),locks={request(name,options,fn){
     const f=fn||options;
@@ -39,12 +39,13 @@ async function environment({accepted=false,patch={},response,server={status:"pro
       throw Error("Unexpected synthetic route");
     },
     chrome:{runtime:{id:"synthetic",getURL:name=>"chrome-extension://synthetic/"+name,
-      onConnect:{addListener(){}},onMessage:{addListener(fn){listeners.push(fn);}},
+      onConnect:{addListener(fn){connect=fn;}},onMessage:{addListener(fn){listeners.push(fn);}},
       async sendMessage(m){
         let value;
         if(m.op==="jobs")value=structuredClone(jobs);
         else if(m.op==="batch")value=batchPlan;
         else if(m.op==="device")value=current;
+        else if(m.op==="ticket")value={attempt:key,sourceKey:"synthetic",device,batch,mode:"save",path:"/c/synthetic"};
         else if(m.op==="saveJobs"){jobs=structuredClone(m.jobs).filter(j=>j.device===current);writes.push(structuredClone(jobs));}
         else if(m.op==="access")value="synthetic";
         else throw Error("Unexpected synthetic RPC");
@@ -59,10 +60,30 @@ async function environment({accepted=false,patch={},response,server={status:"pro
     for(const fn of listeners)if(fn(message,{id:"synthetic",url:"chrome-extension://synthetic/panel.html"},
       r=>r.error?reject(Error(r.error)):resolve(r)))break;
   });
-  return {env,calls,writes,directories,job:()=>jobs[0],all:()=>jobs,command,
+  return {env,calls,writes,directories,job:()=>jobs[0],all:()=>jobs,command,connect,
     tick:()=>vm.runInContext("tick()",env),setDevice:d=>{current=d;},
     evaluate:code=>vm.runInContext(code,env),async settled(){await turn();await locks.request("reader-jobs",()=>{});}};
 }
+test("source stop reaches the real host ledger with trailing counts; no raw reason, false resume or upload",async()=>{
+  for(const [code,category,status] of [["SOURCE_PAGE_INVALID","source"],["SOURCE_BRANCH_UNVERIFIED","source"],
+    ["SOURCE_ATTACHMENT_FAILED","source"],["SOURCE_FORMAT_INVALID","source"],["SOURCE_HTTP_FAILED","permission",403],
+    ["NETWORK_UNAVAILABLE","network"],["CAPTURE_CANCELLED","cancelled"],["arbitrary private text","source"]]){
+    const e=await environment({patch:{phase:"source-starting",packageReady:false,binding:null,stats:{},step:null}});
+    let send,close;const acks=[];
+    e.connect({name:"reader:"+key,sender:{url:"https://chatgpt.com/c/synthetic",tab:{id:1},frameId:0,documentId:"synthetic"},
+      onMessage:{addListener:f=>send=f},onDisconnect:{addListener:f=>close=f},postMessage:m=>acks.push(m),disconnect(){}});
+    await send({op:"hello"});await send({op:"observe",step:{stage:"index",done:3,sourceBytes:70}});
+    await send({op:"observe",step:{stage:"index",done:9,sourceBytes:89,sourcePages:2}});
+    await send({op:"source-stop",diagnostic:{code,status,category:"server",recovery:"retry_existing",message:"private payload"}});
+    close();await e.settled();
+    assert.ok(acks.some(m=>m.op==="source-stopped"));const j=e.job();
+    assert.equal(j.phase,category==="cancelled"?"cancelled":"capture-interrupted");assert.equal(j.active,false);
+    assert.equal(j.diagnostic.code,code.startsWith("arbitrary")?"SOURCE_READ_FAILED":code);
+    assert.equal(j.diagnostic.stage,"index");assert.equal(j.diagnostic.category,category);assert.equal(j.diagnostic.status,status);
+    assert.equal(j.step.done,9);assert.equal(j.stats.indexedNodes,9);assert.equal(j.stats.sourceBytes,89);assert.equal(j.stats.sourcePages,2);
+    assert.doesNotMatch(JSON.stringify(j),/private|retry_existing/);assert.deepEqual(e.calls,[]);assert.equal(e.directories.has(key),false);
+  }
+});
 
 test("restored sealed and batch-owned jobs retain counters/times/step while receipt reconciliation prevents retransmission",async()=>{
   const e=await environment({accepted:true,batchPlan:{id:batch}});

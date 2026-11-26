@@ -81,6 +81,18 @@ test("project-home visible directory discovery cannot resolve conflicting projec
     assert.equal(data.rows.find(r=>r.id==="visible").group,"project:g-p-alpha");
   }finally{p.close();}
 });
+test("only mounted directory links count across manual pages; quoted nav and project links are not membership",async()=>{
+  const p=await workspace("https://chatgpt.com/g/g-p-alpha/project",`<main><a href="/c/bare">Bare link</a>
+    <div data-chatgpt-search-message-ids="msg"><nav><a href="/g/g-p-bad/project">Bogus project</a>
+    <a href="/g/g-p-bad/c/quoted">Quoted chat</a></nav></div><aside hidden><a href="/c/hidden">Hidden row</a></aside></main>`);
+  try{
+    const first=await p.discover();assert.equal(first.complete,false);assert.deepEqual(Array.from(first.rows,r=>r.id),["bare"]);
+    assert.equal(first.rows[0].group,"unknown");assert.equal(Object.keys(first.groups).length,0);
+    p.w.document.querySelector("main").insertAdjacentHTML("beforeend",'<a href="/g/g-p-alpha/c/next">Next mounted row</a>');
+    const next=await p.discover();assert.equal(next.complete,false);assert.equal(next.rows.length,2);
+    assert.equal(next.rows.find(r=>r.id==="next").group,"project:g-p-alpha");assert.equal(p.fetches(),2,"no project or history enumeration requests");
+  }finally{p.close();}
+});
 test("a localized project-home slug names bare project chats by stable ID; conflicting or cross-site labels are not suggested",async()=>{
   const id="g-p-"+"0123456789abcdef".repeat(2);
   const p=await workspace("https://chatgpt.com/",`<nav><a href="/g/${id}-%E6%B5%B7%E6%B4%8B/project">海洋</a>

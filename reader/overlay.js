@@ -185,7 +185,10 @@ globalThis.ReaderOverlay = ({read,busy}) => {
     if(stale||loadedVersion!==ReaderPageIndex.sample()){
       stale=partial=true;notice=L("对话已变化，请重新读取目录后定位。","The conversation changed. Reload the outline before jumping.");paintStatus();return;}
     stopSearch();const ctl=new AbortController();jumpCtl=ctl;owner?.setAttribute("aria-busy","true");notice=L("正在定位…","Locating…");paintStatus();
-    try{const body=target.query?await loadBody(target.id,ctl.signal):undefined;ctl.signal.throwIfAborted();
+    try{let body;
+      if(target.query)body=await loadBody(target.id,ctl.signal);
+      else if(target.heading!==undefined){try{body=await loadBody(target.id,ctl.signal);}catch{/* A semantic DOM title can still be proved without text fallback. */}}
+      ctl.signal.throwIfAborted();if(loadedVersion!==ReaderPageIndex.sample())throw Error("Source changed");
       const result=await ReaderPageIndex.jump(rows,target,ctl.signal,p=>{
         if(!ctl.signal.aborted){notice=L(`正在定位 · 已核对 ${p.probes} 次`, `Locating · ${p.probes} checked positions`);paintStatus();}
       },body);if(ctl.signal.aborted)return;
@@ -194,7 +197,7 @@ globalThis.ReaderOverlay = ({read,busy}) => {
       if(result.ok){
         // Only the verified outcome may select a chapter. An attachment's
         // explicit message-level fallback never implies chapter precision.
-        activeRow(result.kind==="heading"?target:{id:target.id});
+        activeRow(["heading","heading-text"].includes(result.kind)?target:{id:target.id});
         if(compact&&result.kind!=="message-fallback")hide(true);
       }
     }catch{if(!ctl.signal.aborted)notice=L("定位中断，可重试。","Location interrupted. Retry.");}
@@ -272,7 +275,7 @@ globalThis.ReaderOverlay = ({read,busy}) => {
       const data=await read(ctl,step=>{if(!ctl.signal.aborted&&n===routeEpoch){readStep=ReaderProgress.snapshot(step);paintStatus();}});
       if(ctl.signal.aborted||n!==routeEpoch)return;
       if(typeof data.loadBody!=="function")throw Error("Navigation body provider unavailable.");
-      rows=data.rows.map(ReaderPageIndex.metadata);loadBody=data.loadBody;partial=!data.complete;loadedVersion=ReaderPageIndex.sample();group();render();
+      rows=ReaderPageIndex.mergeMounted(data.rows.map(ReaderPageIndex.metadata));loadBody=data.loadBody;partial=!data.complete;loadedVersion=ReaderPageIndex.sample();group();render();
     }catch{if(!ctl.signal.aborted&&n===routeEpoch){partial=true;notice=L("完整目录未读取，可重试。","The full outline could not be read. Retry.");}}
     finally{if(readCtl===ctl){readCtl=null;if(find&&query.value.trim())void runSearch();else paintStatus();}}
   }
@@ -324,7 +327,10 @@ globalThis.ReaderOverlay = ({read,busy}) => {
     if(frameBox.hidden||view!=="outline"||!changes.some(c=>c.target.closest?.("[data-message-id],[data-chatgpt-search-message-ids],[data-current-node-id]")||
       [...c.addedNodes,...c.removedNodes].some(n=>n.matches?.("[data-message-id],[data-chatgpt-search-message-ids],[data-current-node-id]")||n.querySelector?.("[data-message-id],[data-chatgpt-search-message-ids]"))))return;
     clearTimeout(changedTimer);changedTimer=setTimeout(()=>{
-      if(frameBox.hidden||view!=="outline"||loadedVersion===ReaderPageIndex.sample())return;
+      if(frameBox.hidden||view!=="outline")return;
+      if(loadedVersion===ReaderPageIndex.sample()){
+        if(!readCtl&&!jumpCtl&&!stale&&rows.length){const merged=ReaderPageIndex.mergeMounted(rows);if(merged!==rows){rows=merged;group();render();}}return;
+      }
       readCtl?.abort();readCtl=null;stopPreview();stopSearch();stopJump();stale=partial=true;
       notice=L("对话已变化，请重新读取目录。","The conversation changed. Reload the outline.");paintStatus();
     },160);

@@ -9,27 +9,38 @@
   const text=(cn,en)=>navigator.language.startsWith("zh")?cn:en;
   let cancelCapture=null;
   const idOK=s=>typeof s==="string"&&/^[\w-]{1,128}$/.test(s);
+  const problem=(code,message)=>Object.assign(Error(message),{code});
   function wire(ticket,onProgress,onDisconnect){
-    const port=chrome.runtime.connect({name:"reader:"+ticket});let pending=null,dead=false;
-    port.onDisconnect.addListener(()=>{dead=true;onDisconnect();pending?.reject(Error("Reader connection closed"));});
-    port.onMessage.addListener(m=>{if(m.op==="progress"){onProgress(m.step);return;}if(pending){const p=pending;pending=null;m.error?p.reject(Error(m.error)):p.resolve(m);}});
-    return {observe:step=>{if(!dead)port.postMessage({op:"observe",step});},
-      send:m=>new Promise((resolve,reject)=>{if(dead||pending)return reject(Error("Transfer interrupted"));pending={resolve,reject};port.postMessage(m)}),
-      close:()=>{dead=true;pending?.reject(Error(text("读取已取消","Capture cancelled")));pending=null;port.disconnect();}};
+    const port=chrome.runtime.connect({name:"reader:"+ticket});let pending=null,dead=false,stopping,ack;
+    const interrupted=()=>problem("CAPTURE_INTERRUPTED","Reader connection closed");
+    port.onDisconnect.addListener(()=>{dead=true;ack?.();onDisconnect();pending?.reject(interrupted());});
+    port.onMessage.addListener(m=>{if(m.op==="source-stopped"){ack?.();return;}if(m.op==="progress"){onProgress(m.step);return;}
+      if(pending){const p=pending;pending=null;m.error?p.reject(Error(m.error)):p.resolve(m);}});
+    return {observe:step=>{if(!dead&&!stopping)try{port.postMessage({op:"observe",step});}catch{/* Disconnected host retains its last delivered sample. */}},
+      send:m=>new Promise((resolve,reject)=>{if(dead||pending||stopping)return reject(interrupted());pending={resolve,reject};port.postMessage(m)}),
+      stop:diagnostic=>{if(dead)return Promise.resolve();if(!stopping){
+        // Independent acknowledgement: a stop may race an ordinary write. Never mistake its ACK for a row/finish ACK.
+        stopping=new Promise(resolve=>{const timer=setTimeout(resolve,2500);ack=()=>{clearTimeout(timer);resolve();};
+          try{port.postMessage({op:"source-stop",diagnostic});}catch{ack();}});
+        pending?.reject(interrupted());pending=null;
+      }return stopping;},
+      close:()=>{if(dead)return;dead=true;ack?.();pending?.reject(interrupted());pending=null;port.disconnect();}};
   }
   async function capture(onStart,excerpt=false,batch=null,onProgress=()=>{}){
     const id=batch?.id||pathId(),route=location.pathname,controller=new AbortController(),version=ReaderPageIndex.sample();
-    const check=()=>{controller.signal.throwIfAborted();batch?.check();if(location.pathname!==route||!batch&&(generating()||version!==ReaderPageIndex.sample()))throw Error(text("对话或分支发生变化，请重新保存。","Conversation or branch changed. Save again."));};
+    const check=()=>{controller.signal.throwIfAborted();batch?.check();if(location.pathname!==route||!batch&&(generating()||version!==ReaderPageIndex.sample()))throw problem("SOURCE_BRANCH_UNVERIFIED",text("对话或分支发生变化，请重新保存。","Conversation or branch changed. Save again."));};
     cancelCapture=()=>controller.abort();
     check();if(batch)await batch.assert();
     const start=batch||await chrome.runtime.sendMessage({kind:excerpt?"start-append":"start",path:route});check();
     if(!start?.ticket){const e=Error(text("未开始保存。请在侧栏核对目标、连接和实例是否支持网页保存。","Save did not start. Check destination, connection and capture support in the panel."));
       e.displayState=start?.state||(["reconnect","unavailable"].includes(start?.error)?start.error:null);throw e;}
     onStart(start.attempt);
-    const port=wire(start.ticket,onProgress,()=>controller.abort());
-    const reporter=ReaderProgress.throttle(step=>{onProgress(step);port.observe(step);});
-    cancelCapture=()=>{controller.abort();port.close();};
-    const guard=()=>{try{check();}catch{cancelCapture?.();}};
+    const port=wire(start.ticket,onProgress,()=>controller.abort(problem("CAPTURE_INTERRUPTED","Reader connection closed")));
+    let stage="source",transferred=false;
+    const reporter=ReaderProgress.throttle(step=>{stage=step.stage;port.observe(step);onProgress(step);});
+    const stop=e=>{reporter.flush();return port.stop(ReaderProgress.sourceDiagnostic(e,stage));};
+    cancelCapture=(reason=new DOMException("Capture cancelled","AbortError"))=>{controller.abort(reason);if(!transferred)void stop(reason);};
+    const guard=()=>{try{check();}catch(e){cancelCapture?.(e);}};
     const watch=new MutationObserver(()=>{if(generating()||location.pathname!==route)guard();});watch.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:["data-current-node-id","data-testid"]});
     addEventListener("popstate",guard);const clock=setInterval(guard,500);
     const request=sourceRequest(controller,check,step=>reporter.update(step),batch?.validate);
@@ -57,12 +68,13 @@
       }})():null;
       await port.send({op:"header",id,title:data.title,lineage:excerpt?"list":lineage});
       await sendMessages({api,data,id,excerpt,items,selectedCount:selection?.length,request,controller,check,port,textOnly:!!start.textOnly,reporter,batch});
+      transferred=true;
       if(excerpt){check();const r=await chrome.runtime.sendMessage({kind:"open-append",path:route,attempt:start.attempt});
         if(!r?.ok)throw Error(text("已交给 Reader，可在资料库任务中继续。","Received by Reader. Continue from library tasks."));}
     }catch(e){
-      if(excerpt&&e.name==="AbortError"&&!controller.signal.aborted)await port.send({op:"cancel-selection"}).catch(()=>{});
+      if(!transferred)await stop(controller.signal.aborted?controller.signal.reason:e);
       throw e;
-    }finally{reporter.close();watch.disconnect();clearInterval(clock);removeEventListener("popstate",guard);controller.abort();port.close();}
+    }finally{try{reporter.flush();}finally{reporter.close();watch.disconnect();clearInterval(clock);removeEventListener("popstate",guard);controller.abort();port.close();}}
   }
   // Read only the explicitly opened conversation using the existing bounded Fork adapter.
   function sourceRequest(controller,check,report=()=>{},validateSession){
@@ -70,16 +82,17 @@
     return async(input,opts={})=>{
       check();const u=new URL(input,location.origin),local=u.origin===location.origin;
       if(u.protocol!=="https:"||u.username||u.password||(!local&&!/(?:^|\.)(?:oaiusercontent\.com|oaistatic\.com|openai\.com)$/.test(u.hostname)))throw Error("Unsupported media origin");
-      const response=await fetch(u,{...opts,...(!local?{credentials:"omit",headers:{}}:{}),cache:"no-store",redirect:"error",signal:controller.signal,referrerPolicy:"no-referrer"});
+      const netFail=()=>{controller.signal.throwIfAborted();throw problem("NETWORK_UNAVAILABLE","Source connection interrupted.");};
+      const response=await fetch(u,{...opts,...(!local?{credentials:"omit",headers:{}}:{}),cache:"no-store",redirect:"error",signal:controller.signal,referrerPolicy:"no-referrer"}).catch(netFail);
       async function readerFile(pages){
-        if(!response.body)throw Error(text("来源没有返回对话正文。","The source returned no conversation body."));
+        if(!response.body)throw problem("SOURCE_FORMAT_INVALID",text("来源没有返回对话正文。","The source returned no conversation body."));
         const total=contentLength(response.headers);let done=0;
         report({stage:"source",pages,done,total,sourceBytes,sourcePages});
         const stream=response.body.pipeThrough(new TransformStream({transform(bytes,out){
           controller.signal.throwIfAborted();done+=bytes.byteLength;sourceBytes+=bytes.byteLength;
           report({stage:"source",pages,done,total,sourceBytes,sourcePages});out.enqueue(bytes);
         }}));
-        const file=await new Response(stream).blob();sourcePages++;
+        const file=await new Response(stream).blob().catch(netFail);sourcePages++;
         report({stage:"source",pages,done,total,sourceBytes,sourcePages});return file;
       }
       return {ok:response.ok,status:response.status,headers:response.headers,body:response.body,
@@ -91,7 +104,7 @@
   function readBranch(id,controller,request,check,report,batch=false){const marker=batch?undefined:leaf();return FastTextExporter.loadConversation({id,leafId:marker,fetch:request,
     signal:controller.signal,retainRaw:false,sourcePaths:true,readerSource:ReaderSourceFile.conversation(id,marker,check,report)});}
   function verifyVisible(data){
-    if(!source.verify(data))throw Error(text("无法确认当前分支。","Current branch could not be verified."));
+    if(!source.verify(data))throw problem("SOURCE_BRANCH_UNVERIFIED",text("无法确认当前分支。","Current branch could not be verified."));
   }
   async function sendMessages({api,data,id,excerpt,items,selectedCount,request,controller,check,port,textOnly,reporter,batch}){
       const sourceWarnings=data.warnings?.length||0;
@@ -159,7 +172,10 @@
           if(textOnly){for(const [src] of group)body=body.split("]("+src+")").join("] [text only]");continue;}
           if(group.some(([,v])=>!paths.has(v.sandbox?m.id+":"+v.ref:v.ref)))
             observe({stage:"asset",files:fileCount+1,done:0});
-          const files=await Promise.all(group.map(([,v])=>prepareResource(v.ref,v,m)));
+          const files=await Promise.all(group.map(([,v])=>prepareResource(v.ref,v,m))).catch(e=>{
+            controller.signal.throwIfAborted();if(e.code==="NETWORK_UNAVAILABLE")throw e;
+            throw problem("SOURCE_ATTACHMENT_FAILED","Source attachment could not be prepared.");
+          });
           for(let k=0;k<group.length;k++){
             const [src,info]=group[k],target=await writeResource(files[k],info);const link="]("+src+")";
             if(target){if(!body.includes(link))body+="\n\n["+(info.image?"Image":"File")+"]("+src+")";body=body.split(link).join("]("+target+")");assets.add(target);}

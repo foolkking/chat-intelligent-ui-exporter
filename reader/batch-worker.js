@@ -20,7 +20,13 @@ chrome.runtime.onMessage.addListener((m,s,reply)=>{
       if(!c||c.tab!==s.tab.id||c.nonce!==m.nonce)return;
       await navigator.locks.request("reader-jobs",async()=>{
         const {jobs:now=[]}=await chrome.storage.local.get("jobs"),j=now.find(j=>j.key===m.attempt&&j.batch===batchPlan.id&&j.device===device.id);
-        if(j&&!j.iid&&!j.packageReady){j.active=false;j.phase="capture-interrupted";j.step=null;await chrome.storage.local.set({jobs:now});}
+        // The capture host owns a more precise terminal fact; this notification is also possible
+        // before its ticket opens. Never erase its measurements or overwrite a sealed package.
+        if(j&&!j.iid&&!j.packageReady&&["source-starting","reading"].includes(j.phase)){
+          const diag=ReaderProgress.sourceDiagnostic(m.diagnostic,ReaderProgress.snapshot(j.step)?.stage||"source");
+          Object.assign(j,{active:false,phase:diag.category==="cancelled"?"cancelled":"capture-interrupted",diagnostic:diag,finishedAt:Date.now()});
+          await chrome.storage.local.set({jobs:now});
+        }
       });
     })().catch(()=>{});return;
   }

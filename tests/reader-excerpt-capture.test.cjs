@@ -3,7 +3,7 @@
 const test=require("node:test"),assert=require("node:assert/strict"),vm=require("node:vm");
 const fs=require("node:fs"),path=require("node:path"),crypto=require("node:crypto");
 const root=path.resolve(__dirname,"..");
-async function fixture({count=1001,extended=true,picks,excerpt=true,warnings=[]}={}){
+async function fixture({count=1001,extended=true,picks,excerpt=true,warnings=[],readFailure}={}){
   const operations=[],sourceReads=[],progress=[];
   let control,chooseCount=0;
   const row=i=>({id:"m"+i,role:i%2?"assistant":"user",md:`Message ${i} · 潮汐 🪐`,sourcePath:["n"+i]});
@@ -17,7 +17,10 @@ async function fixture({count=1001,extended=true,picks,excerpt=true,warnings=[]}
     document:{querySelector:()=>null,documentElement:{}},MutationObserver:class{observe(){}disconnect(){}},
     addEventListener(){},removeEventListener(){},fetch(){throw Error("No network expected");},
     ChatExportI18n:{setLocale(){}},FastTextExporter:{loadConversation:async()=>data},
-    ReaderSourceFile:{conversation:()=>({})},ReaderVisible:m=>({body:m.md}),
+    ReaderSourceFile:{conversation:(_id,_leaf,_check,report)=>{
+      if(readFailure){report({stage:"index",done:1});report({stage:"index",done:19,sourceBytes:97,sourcePages:2});
+        throw Object.assign(Error("private source text"),{code:readFailure});}
+      return {}; }},ReaderVisible:m=>({body:m.md}),
     ReaderPageIndex:{leaf:()=>undefined,sample:()=>1},
     ChatExportSourceDOM:{generating:()=>false,verify:()=>true,remember(){}},
     ReaderOverlay(){},ReaderSourceControl(opts){control=opts;},
@@ -27,7 +30,7 @@ async function fixture({count=1001,extended=true,picks,excerpt=true,warnings=[]}
         let receive;
         return {onMessage:{addListener(fn){receive=fn;}},onDisconnect:event(),disconnect(){},
           postMessage(m){operations.push(JSON.parse(JSON.stringify(m)));
-            if(m.op!=="observe")queueMicrotask(()=>receive({ok:true}));}};
+            if(m.op!=="observe")queueMicrotask(()=>receive(m.op==="source-stop"?{op:"source-stopped"}:{ok:true}));}};
       }
     }}
   });
@@ -46,6 +49,16 @@ async function fixture({count=1001,extended=true,picks,excerpt=true,warnings=[]}
   try{await control.capture(()=>{},excerpt,null,step=>progress.push(step));}catch(e){error=e;}
   return {operations,sourceReads,progress,chooseCount,error};
 }
+test("a failing source drains the pending sample and sends only a finite reason before disconnect",async()=>{
+  const r=await fixture({readFailure:"SOURCE_PAGE_CHANGED"});assert.ok(r.error);
+  const stop=r.operations.findIndex(m=>m.op==="source-stop");
+  assert.ok(stop>=0);assert.equal(r.operations[stop].diagnostic.code,"SOURCE_PAGE_CHANGED");
+  const step=r.operations.slice(0,stop).filter(m=>m.op==="observe").at(-1).step;
+  assert.equal(step.done,19);assert.equal(step.sourceBytes,97);assert.equal(step.sourcePages,2);
+  assert.equal(r.progress.at(-1).done,19);
+  assert.doesNotMatch(JSON.stringify(r.operations),/private source text/);
+  assert.equal(r.operations.some(m=>m.op==="finish"),false);
+});
 test("1001 selected messages hydrate one at a time and all reach the existing excerpt transport",async()=>{
   const r=await fixture();assert.ifError(r.error);
   const rows=r.operations.filter(m=>m.op==="message-start").map(m=>m.row);

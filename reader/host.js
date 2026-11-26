@@ -178,20 +178,31 @@ chrome.runtime.onConnect.addListener(port=>{
   if(!sender.tab||sender.frameId!==0||u.origin!=="https://chatgpt.com")return;
   let key=crypto.randomUUID(),t,dir,archive,current,assetPath,meta,count=0,finished=false,working=false,closed=false,report,writing=false,assetIndex=0;
   captures.set(port,()=>t?.device);
-  const assets=new Map(),usedAssets=new Set();let lastSelectedUser=null,delivered=false,noticed=false;
+  const assets=new Map(),usedAssets=new Set();let lastSelectedUser=null,delivered=false,noticed=false,sourceStop,stopped;
   async function clean(reason,error){
     try{await report?.close();}catch(problem){error||=problem;}
     await Promise.allSettled([archive,current].filter(Boolean).map(w=>w.abort()));
     if(!delivered||t&&await rpc("device")!==t.device)await erase(key);live.delete(key);
     if(t&&!delivered&&!noticed&&await rpc("device")===t.device){
-      noticed=true;await ledger(key,{device:t.device,phase:reason==="cancel"?"cancelled":reason==="quota"?"storage-full":"capture-interrupted",active:false,
-        diagnostic:error?failureDiagnostic(error,report?.stage||"source"):{category:reason==="cancel"?"cancelled":"source",stage:report?.stage||"source",
-          code:reason==="cancel"?"CAPTURE_CANCELLED":"CAPTURE_INTERRUPTED"}});
+      const diag=reason==="quota"?failureDiagnostic(error,report?.stage||"source"):sourceStop||
+        (error?failureDiagnostic(error,report?.stage||"source"):{category:reason==="cancel"?"cancelled":"source",stage:report?.stage||"source",
+          code:reason==="cancel"?"CAPTURE_CANCELLED":"CAPTURE_INTERRUPTED"});
+      noticed=true;await ledger(key,{device:t.device,phase:diag.category==="cancelled"?"cancelled":reason==="quota"?"storage-full":"capture-interrupted",active:false,
+        diagnostic:diag},t.device);
     }
   }
-  port.onDisconnect.addListener(()=>{closed=true;captures.delete(port);if(!working&&!finished)void clean().catch(()=>{});});
+  const finishStop=()=>stopped||=(async()=>{finished=true;await clean();try{port.postMessage({op:"source-stopped"});}catch{}})();
+  port.onDisconnect.addListener(()=>{closed=true;captures.delete(port);if(!working&&!finished)void (sourceStop?finishStop():clean()).catch(()=>{});});
   port.onMessage.addListener(async m=>{
     if(m.op==="observe"){if(report&&!delivered&&!closed)report.update(m.step);return;}
+    if(m.op==="source-stop"){
+      if(closed&&!sourceStop)return; // Do not replace a host-originated terminal failure.
+      if(finished||delivered){try{port.postMessage({op:"source-stopped"});}catch{}return;}
+      if(!t&&!working)return;
+      sourceStop??=ReaderProgress.sourceDiagnostic(m.diagnostic,report?.stage||"source");closed=true;
+      if(!working)await finishStop();return;
+    }
+    if(closed)return;
     if(working||finished){port.disconnect();return;}working=true;
     try{
       if(!t){
@@ -235,6 +246,7 @@ chrome.runtime.onConnect.addListener(port=>{
         const zip=await archive.finish(assets,report.update);archive=null;
         if(closed||await rpc("device")!==t.device||t.mode==="append"&&!await rpc("source-current",{tab:t.tab,doc:t.doc,path:t.path}))throw Error("Source tab or account changed.");
         for await(const [name] of dir)if(name!=="import.zip")await dir.removeEntry(name);
+        if(closed)throw Error("Source closed before package handoff.");
         const job={key,mode:t.mode,device:t.device,binding:{size:zip.size,sha256:meta.zipDigest,project:t.project||null,excerpt:t.mode==="append"}};
         await ledger(key,{...job,phase:"uploading",active:true,partial:meta.partial,losses:m.losses,packageReady:true});delivered=true;
         try{
@@ -246,7 +258,7 @@ chrome.runtime.onConnect.addListener(port=>{
       }else throw Error("Invalid transfer sequence");
       if(!closed)port.postMessage({ok:true});
     }catch(e){const quota=e.name==="QuotaExceededError";if(!closed)port.postMessage({error:quota?(navigator.language.startsWith("zh")?"浏览器临时空间不足。":"Browser temporary storage is full."):e.message});closed=true;await clean(quota?"quota":null,e);port.disconnect();}
-    finally{working=false;if(closed&&!finished)await clean();}
+    finally{working=false;if(sourceStop)await finishStop();else if(closed&&!finished)await clean();}
   });
 });
 chrome.runtime.onMessage.addListener((m,s,reply)=>{

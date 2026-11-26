@@ -1,7 +1,36 @@
 (function(root) {
   'use strict';
   const I18n = root.ChatExportI18n || (typeof module !== 'undefined' ? require('./i18n.js') : null), t = I18n.t;
-  const error = message => { throw Error(message); };
+  const error = (message,code,status) => { throw Object.assign(Error(message),code?{code,...(status?{status}:{})}:{}); };
+  // JSON objects are unordered. Ignore only well-shaped diagnostic request labels and
+  // record touch times, never source chronology, branch, visibility, unknown fields or arrays.
+  function equalPageValue(left,right,message=false) {
+    const pending=[[left,right,message?1:0]],object=v=>v!==null&&typeof v==="object";
+    while(pending.length){
+      const [a,b,level]=pending.pop();if(a===b)continue;
+      if(!object(a)||!object(b)||Array.isArray(a)!==Array.isArray(b))return false;
+      if(Array.isArray(a)&&a.length!==b.length)return false;
+      const ignored=(k,v)=>level===1&&k==="update_time"&&(v==null||Number.isFinite(v))||
+        level===2&&k==="request_id"&&(v==null||typeof v==="string");
+      for(const k of new Set([...Object.keys(a),...Object.keys(b)])){
+        if(ignored(k,a[k])&&ignored(k,b[k]))continue;
+        if(level===1&&k==="metadata"&&(a[k]==null||object(a[k]))&&(b[k]==null||object(b[k]))){
+          pending.push([a[k]??{},b[k]??{},2]);continue;
+        }
+        if(!Object.hasOwn(a,k)||!Object.hasOwn(b,k))return false;
+        if(a[k]!==b[k])pending.push([a[k],b[k],0]);
+      }
+    }
+    return true;
+  }
+  function samePageRecord(left,right){
+    if(!equalPageValue(left.message??left,right.message??right,true))return false;
+    const a=left.message?left:{},b=right.message?right:{};
+    for(const key of new Set([...Object.keys(a),...Object.keys(b)])){
+      if(key!=="message"&&(!Object.hasOwn(a,key)||!Object.hasOwn(b,key)||!equalPageValue(a[key],b[key])))return false;
+    }
+    return true;
+  }
   // Uploaded and generated images point at the files service, e.g.
   // file-service://file-abc or sediment://file_abc.
   const fileIdOf = pointer => typeof pointer === 'string' ? pointer.match(/^(?:file-service|sediment):\/\/([\w-]+)$/)?.[1] || null : null;
@@ -141,7 +170,7 @@
       // Analysis/tool plumbing is not the displayed answer.
       if (message.channel && !['final','commentary'].includes(message.channel)) continue;
       if (message.recipient && message.recipient !== 'all') continue;
-      if (!message.id || seen.has(message.id)) error(t('err.messageId'));
+      if (!message.id || seen.has(message.id)) error(t('err.messageId'),'SOURCE_FORMAT_INVALID');
       seen.add(message.id);
       const text = textOf(message, warnings);
       const source = message.metadata?.model_dil_v2 ? text : applyReferences(text, message.metadata?.content_references);
@@ -180,7 +209,7 @@
       // The time and model are shown in the sidebar and, when asked, written into the Markdown.
       if (md.trim()) result.push({id:message.id, role, ...normalized, createTime:Number.isFinite(message.create_time) ? message.create_time : undefined, model:role === 'assistant' ? message.metadata?.model_slug : undefined, summary:md.replace(/\s+/g,' ').slice(0,100)});
     }
-    if (!result.length && !allowEmpty) error(t('err.nothingToExport'));
+    if (!result.length && !allowEmpty) error(t('err.nothingToExport'),'SOURCE_FORMAT_INVALID');
     return {messages:result,warnings};
   }
   function parseTree(data, leafId, {sourcePaths=false,maxMessages=Infinity}={}) {
@@ -236,9 +265,9 @@
       return response;
     }
     const sessionResponse = await get('/api/auth/session');
-    if (!sessionResponse.ok && !share) error(t('err.sessionRetry', sessionResponse.status));
+    if (!sessionResponse.ok && !share) error(t('err.sessionRetry', sessionResponse.status),'SOURCE_HTTP_FAILED',sessionResponse.status);
     const session = sessionResponse.ok ? await sessionResponse.json() : {};
-    if (!session.accessToken && !share) error(t('err.login'));
+    if (!session.accessToken && !share) error(t('err.login'),'SOURCE_HTTP_FAILED',401);
     const headers = session.accessToken ? {Authorization:`Bearer ${session.accessToken}`} : {};
     // A shared link is a snapshot with its own id; files belong to the conversation behind it.
     if (share) {
@@ -258,17 +287,17 @@
       if (data.mapping) return {...parseTree(data,leafId,{sourcePaths,maxMessages}),pages,source:'conversation-tree',...(retainRaw?{raw:data}:{})};
       error(t('err.chatFormat'));
     }
-    if (legacy.status !== 404) error(t('err.chatFailed', legacy.status));
+    if (legacy.status !== 404) error(t('err.chatFailed', legacy.status),'SOURCE_HTTP_FAILED',legacy.status);
     let cursor = null, collected = [], title = '', seenCursors = new Set(), rawPages = [];
     do {
       const suffix = cursor ? `&before=${encodeURIComponent(cursor)}` : '';
       const response = await get(`/backend-api/conversations/${encodeURIComponent(id)}?include_has_versions=true&num_turns=100${suffix}`,headers);
-      if (!response.ok) error(t('err.historyFailed', response.status));
+      if (!response.ok) error(t('err.historyFailed', response.status),'SOURCE_HTTP_FAILED',response.status);
       if (readerSource) {
         const page = await readerSource.page(response, pages);
         if (page.result) return page.result;
         cursor = page.before;
-        if (!cursor || seenCursors.has(cursor)) error(t('err.pageCursor'));
+        if (typeof cursor!=='string'||!cursor||seenCursors.has(cursor)) error(t('err.pageCursor'),'SOURCE_PAGE_INVALID');
         seenCursors.add(cursor); pages++;
         continue;
       }
@@ -276,23 +305,24 @@
       if (data.conversation_id && data.conversation_id !== id) error(t('err.otherChat'));
       if (data.mapping && !cursor) return {...parseTree(data,leafId,{sourcePaths,maxMessages}),pages,source:'conversation-tree',...(retainRaw?{raw:data}:{})};
       if(retainRaw)rawPages.unshift(data);
-      if (!Array.isArray(data.messages) || !data.page_info) error(t('err.pageFormat'));
+      if (!Array.isArray(data.messages) || typeof data.page_info?.has_previous_page!=="boolean") error(t('err.pageFormat'),'SOURCE_PAGE_INVALID');
       title ||= data.title || 'ChatGPT';
       if(collected.length+data.messages.length>maxMessages)error(t('err.pageFormat'));
-      collected = [...data.messages.map(item => item.message || item),...collected];
+      collected = [...data.messages,...collected];
       onProgress?.({pages,messages:collected.length});
       if (!data.page_info.has_previous_page) break;
       cursor = data.page_info.start_cursor;
-      if (!cursor || seenCursors.has(cursor) || pages >= 1000) error(t('err.pageCursor'));
+      if (typeof cursor!=='string'||!cursor||seenCursors.has(cursor)||pages>=1000) error(t('err.pageCursor'),'SOURCE_PAGE_INVALID');
       seenCursors.add(cursor); pages++;
     } while (true);
     // API pages are chronological, with older pages prepended. Deduplicate overlaps.
     const unique = [], byId = new Map();
-    for (const message of collected) {
-      if (!message.id) error(t('err.pageMessageId'));
+    for (const item of collected) {
+      const message=item?.message??item;
+      if (!message?.id) error(t('err.pageMessageId'),'SOURCE_PAGE_INVALID');
       if (byId.has(message.id)) {
-        if (JSON.stringify(byId.get(message.id)) !== JSON.stringify(message)) error(t('err.pageChanged'));
-      } else {byId.set(message.id,message);unique.push(message);}
+        if (!samePageRecord(byId.get(message.id),item)) error(t('err.pageChanged'),'SOURCE_PAGE_CHANGED');
+      } else {byId.set(message.id,item);unique.push(message);}
     }
     if(unique.every(m=>Number.isFinite(m.create_time))) unique.sort((a,b)=>a.create_time-b.create_time);
     return {...records(unique),title,pages,source:'paginated-conversation',...(retainRaw?{raw:{pages:rawPages}}:{})};
@@ -490,7 +520,7 @@
     const title = `# ${conversation.title.replace(/\s+/g,' ').trim()}`;
     return `${yaml ? `${properties(conversation, selected, url, options)}\n\n${title}` : `${title}\n\n${t('md.source', url)}`}\n\n${body}\n${note}`;
   }
-  const api = {fileIdOf,textOf,normalizeText,applyReferences,toolImages,records,parseTree,loadConversation,downloadFiles,downloadSandboxFiles,sniffImage,dilImageUrls,downloadUrls,csvTable,markdown};
+  const api = {fileIdOf,textOf,normalizeText,applyReferences,toolImages,records,samePageRecord,parseTree,loadConversation,downloadFiles,downloadSandboxFiles,sniffImage,dilImageUrls,downloadUrls,csvTable,markdown};
   root.FastTextExporter = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(globalThis);

@@ -36,12 +36,14 @@ globalThis.ReaderProgress = (() => {
     "ZIP_PATH_UNSAFE", "ZIP_SOURCE_CHANGED"]);
   const failureStages = new Set(["admission", "analysis", "archive", "commit", "file", "grouping",
     "mapping", "normalization", "validation"]);
-  const codes = new Set([...failureCodes, "READER_TRANSFER_PENDING", "READER_TRANSFER_OFFSET",
+  const sourceCodes = new Set(["SOURCE_FORMAT_INVALID","SOURCE_PAGE_INVALID","SOURCE_PAGE_CHANGED","SOURCE_BRANCH_UNVERIFIED",
+    "SOURCE_ATTACHMENT_FAILED","SOURCE_HTTP_FAILED","SOURCE_READ_FAILED","CAPTURE_CANCELLED","NETWORK_UNAVAILABLE","CAPTURE_INTERRUPTED"]);
+  const codes = new Set([...failureCodes,...sourceCodes, "READER_TRANSFER_PENDING", "READER_TRANSFER_OFFSET",
     "IMPORT_UPLOAD_REQUEST_PENDING", "FILE_TOO_LARGE", "UPLOAD_RECEIPT_INVALID", "UPLOAD_OFFSET_INVALID",
     "UPLOAD_RECEIPT_UNCONFIRMED", "PACKAGE_MISSING", "CAPTURE_INTERRUPTED", "CAPTURE_CANCELLED",
     "LOCAL_STORAGE_FULL", "SOURCE_UNAVAILABLE", "NETWORK_UNAVAILABLE"]);
   const statuses = new Set([400, 401, 403, 404, 408, 409, 410, 413, 415, 422, 429, 500, 502, 503, 504, 507]);
-  const recoveries = new Set(["retry_existing", "free_storage", "reconnect", "review_in_reader", "system_support"]);
+  const recoveries = new Set(["retry_existing", "free_storage", "reconnect", "review_in_reader", "system_support","check_source"]);
   function diagnostic(value) {
     if (!value || !categories.has(value.category)) return null;
     const result = {category: value.category};
@@ -58,6 +60,15 @@ globalThis.ReaderProgress = (() => {
     return diagnostic({category: "server", code: known ? value.code : "TASK_FAILED",
       stage: known ? value.stage : "analysis",
       recovery: known && recoveries.has(value.recovery) ? value.recovery : "system_support"});
+  }
+  // A source port cannot declare a server failure, resumable upload, or arbitrary diagnostic text.
+  function sourceDiagnostic(error,stage="source"){
+    const code=error?.name==="AbortError"?"CAPTURE_CANCELLED":sourceCodes.has(error?.code)?error.code:"SOURCE_READ_FAILED";
+    const status=code==="SOURCE_HTTP_FAILED"?error?.status:undefined;
+    return diagnostic({code,stage:["source","index","messages","asset"].includes(stage)?stage:"source",status,
+      category:code==="CAPTURE_CANCELLED"?"cancelled":status===401?"auth":status===403?"permission":
+        code==="NETWORK_UNAVAILABLE"||status===429||status>=500?"network":"source",
+      recovery:code==="CAPTURE_CANCELLED"?undefined:"check_source"});
   }
   // The device only observes. In particular, a committed legacy receipt with
   // no measured outcome is not proof that every selected item was appended.
@@ -143,5 +154,5 @@ globalThis.ReaderProgress = (() => {
       flush, close() { clearTimeout(timer); pending = timer = null; }
     };
   }
-  return {snapshot, describe, throttle, accumulate, diagnostic, failure, appendReceipt};
+  return {snapshot, describe, throttle, accumulate, diagnostic, sourceDiagnostic, failure, appendReceipt};
 })();

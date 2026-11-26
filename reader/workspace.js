@@ -24,8 +24,10 @@ globalThis.ReaderWorkspace = ({capture,busy}) => {
     // A private chat's own header is also an explicitly visible discovery, not an account scan.
     const own=ReaderRoutes.chat(path);
     if(own)add(own,document.title.replace(/\s*[-|]\s*ChatGPT\s*$/,"").slice(0,512)||"ChatGPT",project);
-    const anchors=[...document.querySelectorAll("nav a[href],aside a[href]"),
-      ...(ReaderRoutes.projectHome(path)?[...document.querySelectorAll("main a[href]")].filter(a=>!a.closest("[data-message-id]")):[])];
+    const notContent=a=>!a.closest("[data-message-id],[data-chatgpt-search-message-ids],[data-message-author-role],[data-response-body],[data-testid^='conversation-turn-'],[hidden],[inert],[aria-hidden=true]")&&
+      (!globalThis.ChatExportSourceDOM||ChatExportSourceDOM.visible(a));
+    const directory=[...document.querySelectorAll("nav a[href],aside a[href]")].filter(notContent);
+    const anchors=[...directory,...(ReaderRoutes.projectHome(path)?[...document.querySelectorAll("main a[href]")].filter(notContent):[])];
     for(const a of anchors){
       const u=new URL(a.href,location.origin);if(u.origin!=="https://chatgpt.com")continue;
       const id=ReaderRoutes.chat(u.pathname);if(!id)continue;
@@ -34,7 +36,7 @@ globalThis.ReaderWorkspace = ({capture,busy}) => {
       // Conflicting directory claims become unknown, never silently adopt one project.
       add(id,title,p);
     }
-    for(const a of document.querySelectorAll("nav a[href],aside a[href]")){
+    for(const a of directory){
       const u=new URL(a.href,location.origin),p=u.origin===location.origin&&ReaderRoutes.projectHome(u.pathname);
       const name=(a.innerText||a.textContent||"").trim()||a.getAttribute("aria-label")?.trim()||a.title?.trim(),group="project:"+p;
       if(!p||!name||name===p)continue;
@@ -48,18 +50,20 @@ globalThis.ReaderWorkspace = ({capture,busy}) => {
   chrome.runtime.onMessage.addListener((m,s,reply)=>{
     if(s.id!==chrome.runtime.id||s.tab||!["reader-batch-discover","reader-batch-check","reader-batch-capture"].includes(m?.kind))return;
     if(m.kind==="reader-batch-discover"){discover().then(reply,e=>reply({error:e.message}));return true;}
-    const check=()=>{if(m.nonce!==nonce||m.path!==location.pathname||!privatePath())throw Error("source-changed");};
-    const assert=async()=>{check();if(!m.scope||await current()!==m.scope)throw Error("source-changed");check();};
+    const changed=()=>Object.assign(Error("source-changed"),{code:"SOURCE_BRANCH_UNVERIFIED"});
+    const check=()=>{if(m.nonce!==nonce||m.path!==location.pathname||!privatePath())throw changed();};
+    const assert=async()=>{check();if(!m.scope||await current()!==m.scope)throw changed();check();};
     if(m.kind==="reader-batch-check"){assert().then(()=>reply({current:true}),()=>reply({current:false}));return true;}
     if(busy()){reply({error:"source-busy"});return;}
     assert().then(()=>{
       if(!valid(m.id)||busy())throw Error("source-busy");
       // Reader target, device tokens and receipt contents are never exposed here.
       const batch={id:m.id,ticket:m.ticket,attempt:m.attempt,textOnly:m.textOnly,check,assert,
-        validate:async session=>{if(await scope(session)!==m.scope)throw Error("source-changed");}};
+        validate:async session=>{if(await scope(session)!==m.scope)throw changed();}};
       const work=capture(()=>{},false,batch);
       reply({started:true});
-      work.catch(()=>chrome.runtime.sendMessage({kind:"batch-source-error",attempt:m.attempt,nonce}).catch(()=>{}));
+      work.catch(e=>chrome.runtime.sendMessage({kind:"batch-source-error",attempt:m.attempt,nonce,
+        diagnostic:ReaderProgress.sourceDiagnostic(e)}).catch(()=>{}));
     }).catch(e=>reply({error:e.message}));return true;
   });
 };

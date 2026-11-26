@@ -38,8 +38,10 @@ globalThis.ReaderExcerpt=(()=>{
         yes?picks.add(i):picks.delete(i);
       }},
       turn(index,value){const t=turns[index];return !!t&&range(t.start,t.end-1,value);},
-      interval(from,to){if(!Number.isInteger(from)||!Number.isInteger(to)||from<1||to>turns.length||from>to)return false;
-        return range(turns[from-1].start,turns[to-1].end-1);},
+      interval(from,to,operation="only"){if(!Number.isInteger(from)||!Number.isInteger(to)||from<1||to>turns.length||from>to||
+          !["only","add","exclude"].includes(operation))return false;
+        if(operation==="only")picks.clear();
+        return range(turns[from-1].start,turns[to-1].end-1,operation!=="exclude");},
       turnState(index){const t=turns[index];let count=0;for(let i=t.start;i<t.end;i++)if(picks.has(i))count++;
         return {count,total:t.end-t.start,checked:count===t.end-t.start,partial:count>0&&count<t.end-t.start};}
     };
@@ -57,7 +59,7 @@ globalThis.ReaderExcerpt=(()=>{
       .message{padding-inline-start:20px;border-top:1px solid var(--line)}.message>label{flex:1}.message input{margin-top:4px}.message details{margin:0 0 4px 24px}
       summary{cursor:pointer;min-height:44px;color:var(--accent)}.full-text{max-height:180px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;margin:4px 0;font-size:13px}
       .tools,.range,.search{display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:4px 16px;flex:none}.tools button{border:1px solid var(--line);border-radius:20px;font-size:12px;padding-inline:10px}
-      .range input{width:72px;min-height:44px;border:1px solid var(--line);background:var(--paper);color:var(--ink);border-radius:6px;padding:6px}
+      .range input,.range select{box-sizing:border-box;min-height:44px;border:1px solid var(--line);background:var(--paper);color:var(--ink);border-radius:6px;padding:6px}.range input{width:5em}.range select:focus-visible{outline:2px solid var(--accent)}
       .search input{min-width:0;flex:1;width:100%;min-height:44px;border:1px solid var(--line);background:var(--paper);color:var(--ink);border-radius:6px;padding:6px 10px}
       .notice{font-size:12px;color:var(--soft);padding:0 16px 6px}.notice:empty{display:none}header{display:flex;gap:8px;align-items:center}header>div{min-width:0;flex:1}
       footer,nav{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px}nav{padding:2px 16px}nav span{margin-inline-end:auto}button{min-height:44px;border:0;border-radius:7px;padding:5px 10px;color:var(--accent);background:transparent;font:inherit;cursor:pointer}button:disabled{opacity:.48;cursor:not-allowed}button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
@@ -82,12 +84,16 @@ globalThis.ReaderExcerpt=(()=>{
       for(const [kind,cn,en] of [["all","全选","All"],["none","清空","Clear"],["user","只选提问","Questions"],["assistant","只选回答","Answers"],["invert","反选","Invert"]]){
         const b=el("button",L(cn,en));b.type="button";b.onclick=()=>{selection.apply(kind);update();};tools.append(b);
       }
-      const from=el("input"),to=el("input"),addRange=el("button",L("选择","Select"));
+      const from=el("input"),to=el("input"),operation=el("select"),applyRange=el("button",L("应用","Apply"));
+      operation.setAttribute("aria-label",L("区间操作","Range action"));
+      for(const [value,cn,en] of [["only","仅选此区间","Select only this range"],["add","加入选择","Add to selection"],["exclude","排除此区间","Exclude this range"]]){
+        const option=el("option",L(cn,en));option.value=value;operation.append(option);
+      }
       for(const [input,label] of [[from,L("起始轮次","First turn")],[to,L("结束轮次","Last turn")]]){
         input.type="number";input.min="1";input.max=String(selection.turns.length);input.setAttribute("aria-label",label);
       }from.value="1";to.value=String(selection.turns.length);
-      addRange.onclick=()=>{if(!selection.interval(Number(from.value),Number(to.value))){notice.textContent=L("请输入有效的起止轮次。","Enter a valid turn range.");return;}update();};
-      interval.append(el("span",L("选择轮次","Turns")),from,el("span",L("至","to")),to,addRange);
+      applyRange.onclick=()=>{if(!selection.interval(Number(from.value),Number(to.value),operation.value)){notice.textContent=L("请输入有效的起止轮次。","Enter a valid turn range.");return;}anchor=null;update();};
+      interval.append(el("span",L("轮次","Turns")),from,el("span",L("至","to")),to,operation,applyRange);
       const input=el("input");input.type="search";input.placeholder=L("搜索完整正文…","Search full messages…");input.setAttribute("aria-label",input.placeholder);search.append(input);
       const schedule=()=>{searchCtl?.abort();clearTimeout(searchTimer);searchTimer=setTimeout(()=>void find(),180);};
       input.oninput=()=>{if(!composing)schedule();};input.oncompositionstart=()=>{composing=true;searchCtl?.abort();clearTimeout(searchTimer);};input.oncompositionend=()=>{composing=false;schedule();};

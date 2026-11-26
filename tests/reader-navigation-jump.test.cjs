@@ -63,6 +63,36 @@ function fixture(){
 async function locate(f,rows,target={id:"a"},ctl=new AbortController()){
   return f.index.jump(rows,target,ctl.signal);
 }
+test("combine source chapters with unique mounted structured titles and keep API-only chapters",()=>{
+  const f=fixture();try{
+    const root=f.root(),msg=f.message(root,"a",0,'<h2>First</h2><div data-heading-level="3">DOM only</div><p><b>Not a title</b></p><h2>Last</h2>');
+    const rows=f.rows();rows[0].headings=[{text:"First",level:2},{text:"Source only",level:3},{text:"Last",level:2}];f.verify(rows);
+    const merged=f.index.mergeMounted(rows);
+    assert.deepEqual(Array.from(merged[0].headings,h=>h.text),["First","Source only","DOM only","Last"]);
+    assert.equal(merged[0].sections[2].parent,0);assert.equal(f.index.destination(msg,merged[0],{heading:2}).node,msg.querySelector("[data-heading-level]"));
+    f.message(root,"a",100,'<h2>Wrong sibling copy</h2>');assert.equal(f.index.mergeMounted(rows),rows);
+  }finally{f.close();}
+});
+test("non-heading rendering lands on a corroborated unique chapter block, never prose, code, or a duplicate",async()=>{
+  const f=fixture();try{
+    const root=f.root(),msg=f.message(root,"a",600,'<p>Lead</p><p data-offset="370"><b>Section two</b></p><p>Detail</p>');
+    const rows=f.rows();Object.assign(rows[0],{body:"Lead\n\n### Section two\n\nDetail",headings:[{level:3,text:"Section two"}]});f.verify(rows);
+    assert.equal((await locate(f,rows,{id:"a",heading:0})).kind,"heading-text");
+    const p=msg.children[1];p.insertAdjacentHTML("afterend","<p>Section two</p>");assert.equal(f.index.destination(msg,rows[0],{heading:0}),null);
+    p.nextElementSibling.remove();p.innerHTML="<code>Section two</code>";assert.equal(f.index.destination(msg,rows[0],{heading:0}),null);
+    p.textContent="Discuss Section two elsewhere";assert.equal(f.index.destination(msg,rows[0],{heading:0}),null);
+  }finally{f.close();}
+});
+test("far history can pass 12 seconds only with advancing identified windows; a stationary boundary is not repeatedly probed",async()=>{
+  const f=fixture();try{
+    const root=f.root({size:1400}),rows=f.rows(Array.from({length:305},(_,i)=>"m"+i));
+    const show=i=>{root.replaceChildren();const y=root.scrollTop+50;f.message(root,"m"+i,y);};
+    show(304);f.verify(rows);
+    for(const [frame,i] of [[95,204],[180,104],[255,0]])f.hooks.set(frame,()=>show(i));
+    const result=await locate(f,rows,{id:"m0"});
+    assert.equal(result.ok,true);assert.ok(f.clock>12000&&f.clock<45000);assert.ok(result.probes<20);
+  }finally{f.close();}
+});
 test("new repeated identity containers land on the actual response heading, not the sr-only role marker",async()=>{
   const f=fixture();try{
     const root=f.root(),msg=f.doc.createElement("div");

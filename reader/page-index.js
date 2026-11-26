@@ -3,12 +3,17 @@ globalThis.ReaderPageIndex = (() => {
   const source=globalThis.ChatExportSourceDOM, idOf=source.idOf;
   const mounted=source.mounted, surface=source.surface;
   const tidy=s=>(s||"").replace(/\s+/g," ").trim();
-  const headingLevel=el=>/^H[1-6]$/.test(el.tagName)?Number(el.tagName[1]):
-    el.getAttribute("role")==="heading"&&/^[1-6]$/.test(el.getAttribute("aria-level")||"")?Number(el.getAttribute("aria-level")):0;
+  const headingSelector="h1,h2,h3,h4,h5,h6,[role=heading],[data-heading-level]";
+  function headingLevel(el){
+    if(/^H[1-6]$/.test(el.tagName))return Number(el.tagName[1]);
+    const level=el.getAttribute("data-heading-level")??(el.getAttribute("role")==="heading"?(el.getAttribute("aria-level")??"2"):null);
+    return /^[1-6]$/.test(level||"")?Number(level):0;
+  }
   // Explicit heading semantics are structural evidence; ordinary bold text and
   // screen-reader conversation-role labels are not answer chapters.
-  const titles=el=>[...surface(el).querySelectorAll("h1,h2,h3,h4,h5,h6,[role=heading][aria-level]")]
-    .filter(n=>headingLevel(n)&&!n.matches("[data-conversation-role]")&&!n.closest(".sr-only,pre,code")&&source.visible(n));
+  const titles=el=>[...surface(el).querySelectorAll(headingSelector)]
+    .filter(n=>headingLevel(n)&&!n.matches("[data-conversation-role]")&&!n.closest(".sr-only,pre,code,button,nav")&&source.visible(n)&&
+      !n.querySelector(headingSelector)&&tidy(n.textContent)&&n.getClientRects().length);
   const fileName=el=>tidy(el.getAttribute("data-file-name")||el.getAttribute("download")||el.getAttribute("alt")||el.textContent);
   function fileNodes(el){
     const result=new Set();
@@ -80,6 +85,33 @@ globalThis.ReaderPageIndex = (() => {
       headings:(row.headings||[]).map(h=>({level:h.level,text:copy(h.text)})),
       files:(row.files||[]).map(f=>typeof f==="string"?copy(f):{name:copy(f.name),id:copy(f.id),type:f.type,occurrence:f.occurrence})};
     entry.sections=sections(entry);return entry;
+  }
+  // Anchor DOM-only chapters against shared titles in document order. Ambiguous duplicate
+  // counts or contradictory ordering must not renumber two indistinguishable chapters.
+  function mergeHeadings(api,dom){
+    const byText=list=>{const map=new Map();list.forEach((h,i)=>{let a=map.get(h.text);if(!a)map.set(h.text,a=[]);a.push(i);});return map;};
+    const a=byText(api),b=byText(dom),occ=new Map(),result=[];let next=0,pending=[];
+    for(const h of dom){
+      const indices=a.get(h.text);
+      if(!indices){pending.push(h);continue;}
+      const at=occ.get(h.text)||0;occ.set(h.text,at+1);
+      if(indices.length!==b.get(h.text).length)continue;
+      const i=indices[at];if(i<next||indices.length>1&&api[i].level!==h.level)return api;
+      while(next<i)result.push(api[next++]);
+      for(const extra of pending)result.push(extra);pending=[];
+      result.push(h);next=i+1;
+    }
+    while(next<api.length)result.push(api[next++]);
+    for(const extra of pending)result.push(extra);
+    return result.length===api.length&&result.every((h,i)=>h.level===api[i].level&&h.text===api[i].text)?api:result;
+  }
+  function mergeMounted(rows){
+    const live=new Map();for(const el of mounted()){const id=idOf(el);live.set(id,live.has(id)?null:el);}
+    let changed=false;const merged=rows.map(row=>{
+      const el=live.get(row.id);if(!el||source.roleOf(el)!==row.role||source.pending(el)||uncertain.has(el))return row;
+      const headings=mergeHeadings(row.headings,titles(el).map(n=>({level:headingLevel(n),text:tidy(n.textContent)})));
+      if(headings===row.headings)return row;changed=true;return metadata({...row,headings});
+    });return changed?merged:rows;
   }
   function tree(rows){
     const turns=[];
@@ -238,7 +270,21 @@ globalThis.ReaderPageIndex = (() => {
       const candidates=titles(msg).filter(el=>tidy(el.textContent)===h.text&&headingLevel(el)===h.level);
       // If only one of two equal headings is currently mounted, its ordinal
       // is unknown. Wait for proof rather than choosing an unrelated heading.
-      if(candidates.length!==row.headings.filter(a=>a.text===h.text&&a.level===h.level).length)return null;
+      if(candidates.length!==row.headings.filter(a=>a.text===h.text&&a.level===h.level).length){
+        // Hydrated widgets can render a semantic API heading as an ordinary standalone
+        // block. Require a unique source heading AND text occurrence, context on both
+        // sides in this same message, and a whole visible block (not a mention).
+        if(candidates.length||typeof row.body!=="string"||row.headings.filter(a=>a.text===h.text).length!==1||
+          !headings(row.body).some(a=>a.level===h.level&&a.text===h.text))return null;
+        const count=matches(row.body,h.text);if(count.next().done||!count.next().done)return null;
+        const match=textTarget(msg,row,{query:h.text,occurrence:0});if(!match)return null;
+        const block=match.node.closest("p,li,div,dt,figcaption");
+        if(!block||!msg.contains(block)||tidy(block.textContent)!==h.text||
+          block.closest(`${headingSelector},pre,code,button,nav,.sr-only`)||block.querySelector(`${headingSelector},pre,code,button,nav,.sr-only,[hidden],[aria-hidden=true]`)||
+          !block.contains(match.range.endContainer))return null;
+        const rendered=matches(textMap(surface(msg)).text,h.text);rendered.next();if(!rendered.next().done)return null;
+        return {...match,kind:"heading-text",rect:()=>[...match.range.getClientRects()].find(r=>r.width&&r.height)||match.range.getBoundingClientRect()};
+      }
       node=candidates[same];
       kind="heading";if(!node)return null;
     }
@@ -298,7 +344,8 @@ globalThis.ReaderPageIndex = (() => {
     const fail=reason=>({ok:false,reason});
     if(index===undefined)return fail("missing");
     if(order.size!==rows.length)return fail("target");
-    const row=targetBody===undefined?rows[index]:{...rows[index],body:targetBody},until=performance.now()+12000;
+    const row=targetBody===undefined?rows[index]:{...rows[index],body:targetBody},now=performance.now(),hardEnd=now+45000;
+    let until=now+12000,best=Infinity,advances=0,lastProbe;
     let root,shape="",probes=0,low=0,high=Infinity,stable=0,previous,lastReason="unmounted",interrupted=false;
     let wake,expired=false;
     const notify=()=>wake?.();
@@ -319,7 +366,8 @@ globalThis.ReaderPageIndex = (() => {
     });
     for(const event of events)document.addEventListener(event,input,{capture:true,passive:true});
     signal?.addEventListener("abort",notify,{once:true});
-    const deadline=setTimeout(()=>{expired=true;notify();},Math.max(0,until-performance.now()));
+    const expire=()=>{expired=true;notify();};
+    let deadline=setTimeout(expire,12000);
     try{
       while(!expired&&performance.now()<until){
         check();const els=mounted();if(changed(els))return fail("changed");
@@ -329,7 +377,7 @@ globalThis.ReaderPageIndex = (() => {
         const nextRoot=anchor&&scroller(anchor);
         if(!nextRoot?.isConnected){lastReason="unmounted";previous=null;stable=0;await pause();continue;}
         const view=range(nextRoot),bounds=axis(nextRoot),nextShape=JSON.stringify([bounds.start,nextRoot.scrollHeight,nextRoot.clientHeight,view]);
-        if(nextRoot!==root||nextShape!==shape){root=nextRoot;shape=nextShape;low=0;high=Infinity;previous=null;stable=0;}
+        if(nextRoot!==root||nextShape!==shape){root=nextRoot;shape=nextShape;low=0;high=Infinity;previous=null;stable=0;lastProbe=null;}
         const reveal=outerAdjustment(root);
         if(reveal){check();reveal.root.scrollTo({top:reveal.top,behavior:"instant"});previous=null;stable=0;await pause();continue;}
         if(found.length){
@@ -353,11 +401,18 @@ globalThis.ReaderPageIndex = (() => {
         }else{
           previous=null;stable=0;lastReason="unmounted";
           const top=root===document.scrollingElement?0:root.getBoundingClientRect().top;
-          const anchors=known.filter(el=>scroller(el)===root).map(el=>({index:order.get(idOf(el)),r:el.getBoundingClientRect()}))
+          const unique=new Set(),duplicate=new Set();for(const el of known){const id=idOf(el);if(unique.has(id))duplicate.add(id);unique.add(id);}
+          const anchors=known.filter(el=>!duplicate.has(idOf(el))&&!source.pending(el)&&!uncertain.has(el)&&scroller(el)===root).map(el=>({index:order.get(idOf(el)),r:el.getBoundingClientRect()}))
             .filter(a=>a.r.width>0&&a.r.height>0).sort((a,b)=>a.index-b.index);
           // A delayed virtual window may still be entirely offscreen. Wait
           // within the same deadline; never infer bounds from stale DOM.
-          if(!anchors.some(a=>inside(a.r,view))){await pause();continue;}
+          let distance=Infinity;for(const a of anchors)if(inside(a.r,view))distance=Math.min(distance,Math.abs(a.index-index));
+          if(!Number.isFinite(distance)){await pause();continue;}
+          if(distance<best){
+            if(Number.isFinite(best)){advances++;until=Math.min(hardEnd,performance.now()+12000);
+              clearTimeout(deadline);deadline=setTimeout(expire,Math.max(0,until-performance.now()));}
+            best=distance;
+          }
           const max=bounds.extent,position=root.scrollTop-bounds.start,first=anchors[0],last=anchors.at(-1);
           for(const a of anchors){
             const y=position+a.r.top-top;
@@ -368,8 +423,10 @@ globalThis.ReaderPageIndex = (() => {
           let y=position+first.r.top-top+(index-first.index)*average;
           if(Number.isFinite(high)&&low<high)y=Math.max(low,Math.min(high,y));
           y=Math.max(0,Math.min(max,y));
-          if(Math.abs(y-position)<2&&low<Math.min(high,max))y=(low+Math.min(high,max))/2;
-          check();report({probes:++probes});check();root.scrollTo({top:bounds.start+y,behavior:"instant"});
+          const waitingEdge=index<first.index&&position<=1&&y<=1||index>last.index&&position>=max-1&&y>=max-1;
+          if(!waitingEdge&&Math.abs(y-position)<2&&low<Math.min(high,max))y=(low+Math.min(high,max))/2;
+          const key=[first.index,last.index,Math.round(position),Math.round(y)].join(":");
+          if(key!==lastProbe){lastProbe=key;check();report({probes:++probes,advances});check();root.scrollTo({top:bounds.start+y,behavior:"instant"});}
         }
         await pause();
       }
@@ -427,5 +484,5 @@ globalThis.ReaderPageIndex = (() => {
     }
     listener(layout());update();return ()=>layoutListeners.delete(listener);
   }
-  return {mounted,idOf,domRows,domBody,fromBranch,metadata,sections,tree,search,leaf,sample,visible,currentSection,jump,matches,textTarget,destination,layout,observeLayout,generating};
+  return {mounted,idOf,domRows,domBody,fromBranch,metadata,mergeMounted,sections,tree,search,leaf,sample,visible,currentSection,jump,matches,textTarget,destination,layout,observeLayout,generating};
 })();

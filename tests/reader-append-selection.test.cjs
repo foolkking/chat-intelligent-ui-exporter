@@ -29,6 +29,15 @@ test("leading answers and consecutive questions form distinct real turns",()=>{
   assert.deepEqual(m.turns,[{start:0,end:2},{start:2,end:3},{start:3,end:5}]);
   m.picks.delete(1);assert.deepEqual(m.turnState(0),{count:1,total:2,checked:false,partial:true});
 });
+test("a range replaces default All; add and exclude are explicit and invalid operations are atomic",()=>{
+  const m=ReaderExcerpt.model(rows(251));assert.equal(m.interval(11,13),true);
+  assert.deepEqual([...m.picks],[20,21,22,23,24,25]);
+  assert.equal(m.interval(125,126,"add"),true);assert.equal(m.interval(12,12,"exclude"),true);
+  assert.deepEqual([...m.picks],[20,21,24,25,248,249,250]);
+  for(const args of [[0,2],[1,1.5],[2,1],[1,127],[1,2,"typo"]]){
+    assert.equal(m.interval(...args),false);assert.deepEqual([...m.picks],[20,21,24,25,248,249,250]);
+  }
+});
 test("the selector preserves all choices through pages, permits complete preview and gates legacy submission",async()=>{
   const {JSDOM}=require("jsdom"),dom=new JSDOM("<button id=before>Before</button>",{runScripts:"outside-only",pretendToBeVisual:true});
   const w=dom.window,roots=[],attach=w.Element.prototype.attachShadow;
@@ -45,6 +54,12 @@ test("the selector preserves all choices through pages, permits complete preview
     assert.ok([...root.querySelector(".group").querySelectorAll(".message")].every(row=>row.hidden));
     assert.match(root.querySelector("nav span").textContent,/251 \/ 251/,"folding does not clear selection");
     assert.equal(reads.length,0,"folding cannot trigger a body preview");
+    const op=root.querySelector(".range select"),[from,to]=root.querySelectorAll(".range input"),apply=root.querySelector(".range button");
+    assert.equal(op.value,"only");from.value="12";to.value="14";apply.click();
+    assert.match(root.querySelector("nav span").textContent,/6 \/ 251/);assert.equal(root.querySelector(".next").disabled,false);
+    op.value="add";from.value=to.value="126";apply.click();assert.match(root.querySelector("nav span").textContent,/7 \/ 251/);
+    op.value="exclude";from.value=to.value="13";apply.click();assert.match(root.querySelector("nav span").textContent,/5 \/ 251/);
+    assert.equal(reads.length,0);[...root.querySelectorAll(".tools button")].find(b=>b.textContent==="All").click();
     root.querySelector("nav button:last-child").onclick();assert.equal(root.querySelector("input[data-index]").dataset.index,"24");
     const detail=root.querySelector("details");detail.open=true;await detail.ontoggle();
     assert.equal(reads.length,1);assert.match(detail.querySelector("pre").textContent,/Complete body/);

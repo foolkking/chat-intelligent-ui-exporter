@@ -13,24 +13,59 @@ globalThis.ReaderLocalArchive=(()=>{
   }
   async function open(file,dir,check=()=>{},report=()=>{}) {
     const digest=await fingerprint(file,check,report),magic=new Uint8Array(await file.slice(0,4).arrayBuffer());
-    let zip,source=file;
+    let zip,source=file,projectDirectory;
     if(magic.join(",")==="80,75,3,4"){
       zip=await ReaderZipSource.open(file,check);
       const candidates=[...zip.members.values()].filter(m=>/(^|\/)conversations\.json$/i.test(m.name));
       if(candidates.length!==1)throw Error("conversation-file");
       source=await zip.extract(candidates[0],await dir.getFileHandle("catalogue.json",{create:true}),report);
+      projectDirectory=zip.members.get(candidates[0].name.replace(/conversations\.json$/i,"projects.json"));
     }
-    const rows=[],ids=new Set();
+    const rows=[],ids=new Set(),names=new Map(),projectGroups=new Set();
+    function claim(group,value,claims=names){
+      const name=typeof value==="string"?value.trim():"";
+      if(!name||name===group.slice(8))return;
+      if(!claims.has(group))claims.set(group,name);
+      else if(claims.get(group)!==name)claims.set(group,null);
+    }
     for await(const span of ReaderSourceFile.entries(source,0,source.size,false,check)){
-      check();const piece=source.slice(span.start,span.end),h=await ReaderSourceFile.header(piece,check);
+      check();const piece=source.slice(span.start,span.end),h=await ReaderSourceFile.header(piece,check,true);
       const id=h.conversation_id??h.id;
       if(!valid(id)||h.id!=null&&h.id!==id||ids.has(id)||!h.mapping||!valid(h.current_node))fail();
       ids.add(id);
       // Missing membership is unknown. A Custom GPT's gizmo_id is never a project.
       const group=valid(h.project_id)?"project:"+h.project_id:h.project_id===null?"unclassified":"unknown";
+      if(group.startsWith("project:")){
+        projectGroups.add(group);claim(group,h.project_name);claim(group,h.project_title);
+      }
       rows.push({id,title:String(h.title||"ChatGPT").slice(0,512),group,start:span.start,end:span.end,
         ...(Number.isFinite(h.update_time)?{update_time:h.update_time}:{})});
       report({stage:"index",done:rows.length});
+    }
+    // Optional sibling directory of explicit {id,name} records. It can name an
+    // already proven group, never assign conversations or turn a GPT into a project.
+    if(projectDirectory&&projectGroups.size){
+      try{
+        const catalog=await zip.extract(projectDirectory,await dir.getFileHandle("project-names.json",{create:true}),report);
+        const read=ReaderSourceFile.fileReader(catalog),pending=new Map(names),keys=new Set(["id","project_id","name","title","project_name"]);
+        for await(const span of ReaderSourceFile.entries(catalog,0,catalog.size,false,check)){
+          const entry={};
+          for await(const f of ReaderSourceFile.entries(catalog,span.start,span.end,true,check)){
+            if(!keys.has(f.key))continue;
+            if(Object.hasOwn(entry,f.key))throw Error("optional-directory");
+            entry[f.key]=f.end-f.start<=8192?await read(f.start,f.end):null;
+          }
+          const id=entry.project_id??entry.id;
+          if(!valid(id)||entry.id!=null&&entry.id!==id||!projectGroups.has("project:"+id))continue;
+          for(const name of [entry.name,entry.title,entry.project_name])claim("project:"+id,name,pending);
+        }
+        for(const [group,name] of pending)names.set(group,name);
+      }catch(e){
+        // Optional names are advisory. Never publish a partially read directory,
+        // weaken conversation/member checks, or swallow cancellation / I/O failures.
+        if(!(e instanceof SyntaxError)&&!["Unrecognized conversation source.","optional-directory","archive-format"].includes(e.message))throw e;
+        check();
+      }
     }
     const index=new Map(rows.map(r=>[r.id,r]));
     function memberFor(ref,filename){
@@ -86,7 +121,7 @@ globalThis.ReaderLocalArchive=(()=>{
         const archive=await writer.finish(assets,progress);return {file:archive,sha256:meta.zipDigest,partial:meta.partial,losses};
       }catch(e){await writer.abort();throw e;}
     }
-    return {digest,rows,build,complete:true};
+    return {digest,rows,groups:Object.fromEntries([...names].filter(([,name])=>name)),build,complete:true};
   }
   return {open,fingerprint};
 })();

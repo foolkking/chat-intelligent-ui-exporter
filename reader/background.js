@@ -65,7 +65,7 @@ chrome.runtime.onMessage.addListener((m,s,reply)=>{
       e.status===404?"unavailable":e.readerReason||"offline"}));return true;
   }
   if(m?.kind==="wake"){
-    (async()=>{if(!privatePage(s,"panel.html")&&!await authorizedFrame(s)&&!(s.id===chrome.runtime.id&&s.frameId===0&&s.url?.split("?")[0]===chrome.runtime.getURL("center.html")))return {};
+    (async()=>{if(!privatePage(s,"panel.html")&&!await authorizedFrame(s)&&!await centerPage(s))return {};
       await host();return {ok:true};})().then(reply,()=>reply({error:"Background unavailable"}));return true;
   }
 });

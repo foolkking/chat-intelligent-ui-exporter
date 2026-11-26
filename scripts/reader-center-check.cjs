@@ -65,10 +65,10 @@ const check=(name,pass)=>{report.checks.push({name,pass:!!pass});assert(pass,nam
   await page.screenshot({path:path.join(run,"01-source.png")});report.screens.push("01-source.png");
   await (await page.$("#source-file")).uploadFile(file);await page.waitForFunction(()=>!document.querySelector("#selection-step").hidden);
   check("initial catalogue has zero checked rows",await page.$$eval("#source-rows input:checked",n=>n.length===0));
-  await page.select("#source-group","project:project-a");await page.click("#source-rows input");
-  await page.select("#source-group","project:project-b");await page.click("#source-rows input");
+  await page.click('#project-groups button[data-group="project:project-a"]');await page.click("#source-rows input");
+  await page.click('#project-groups button[data-group="project:project-b"]');await page.click("#source-rows input");
   check("cross-project selection is retained",await page.$eval("#selected-count",n=>n.textContent.includes("2")));
-  await page.select("#source-group","unknown");check("unknown project is separate from unclassified",await page.$$eval("#source-rows li",n=>n.length===1));
+  await page.click('#project-groups button[data-group="unknown"]');check("unknown project is separate from unclassified",await page.$$eval("#source-rows li",n=>n.length===1));
   await page.screenshot({path:path.join(run,"02-selection.png")});report.screens.push("02-selection.png");
   await worker.evaluate(async({origin,device,token,refresh,user})=>{
     await ReaderClient.trust;
@@ -124,7 +124,7 @@ const check=(name,pass)=>{report.checks.push({name,pass:!!pass});assert(pass,nam
   await page.click("#new-import");await page.click("#web-source");await page.waitForSelector("#web-tabs button");await page.click("#web-tabs button");
   await page.waitForFunction(()=>!document.querySelector("#selection-step").hidden);
   check("web directory initially empty selection and marked partial",await page.evaluate(()=>document.querySelectorAll("#source-rows input:checked").length===0&&/部分|partial/.test(document.querySelector("#source-status").textContent)));
-  await page.select("#source-group","");await page.click("#select-visible");await page.click("#to-target");
+  await page.click('#project-groups button[data-group=""]');await page.click("#select-visible");await page.click("#to-target");
   await page.waitForFunction(()=>!document.querySelector("#confirm-import").disabled);await page.click("#confirm-import");
   await page.waitForFunction(()=>!document.querySelector("#tasks-step").hidden&&document.querySelector("#task-rows").textContent.includes("Web Alpha"));
   await page.waitForFunction(()=>document.querySelectorAll("#task-rows a").length===2,{timeout:real?180000:45000});

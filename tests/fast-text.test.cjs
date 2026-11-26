@@ -36,3 +36,33 @@ test('missing parents, other conversation, invalid sessions and abort are explic
  await assert.rejects(api.loadConversation({id:'chat',fetch:fetcher(path=>({body:path==='/api/auth/session'?{accessToken:'test'}:{...tree(),conversation_id:'other'}}),[])}),/不同对话/);
  const controller=new AbortController();controller.abort();await assert.rejects(api.loadConversation({id:'chat',signal:controller.signal,fetch:()=>assert.fail('request after abort')}),{name:'AbortError'});
 });
+test('image-only missing assets emit the fallback in both Markdown profiles, including whitespace-only text',()=>{
+ const expected='> '+require('../extension/i18n.js').t('md.needsImages');
+ for(const text of ['', ' \n\t'])for(const pointer of ['https://example.invalid/synthetic.png','unknown://synthetic',undefined]){
+   const input=message('image',text,'user');
+   input.content={content_type:'multimodal_text',parts:[text,{content_type:'image_asset_pointer',asset_pointer:pointer}]};
+   const result=api.records([input]);
+   assert.equal(result.messages.length,1);
+   const row=result.messages[0];
+   assert.equal(row.id,'image');assert.equal(row.md,expected);assert.equal(row.mdEscaped,expected);
+   assert.equal(row.needsAssets,true);assert.deepEqual(row.images,[]);assert.equal(result.warnings.length,1);
+ }
+});
+test('missing-media fallback never replaces real prose, escaped HTML, or a downloadable image',()=>{
+ const input=message('image','<svg> is literal prose','assistant');
+ input.content.parts.push({content_type:'image_asset_pointer',asset_pointer:'https://example.invalid/synthetic.png'});
+ const row=api.records([input]).messages[0];
+ assert.equal(row.md,'<svg> is literal prose');assert.equal(row.mdEscaped,'&lt;svg> is literal prose');
+ assert.equal(row.needsAssets,true);
+ input.content.parts=[{content_type:'image_asset_pointer',asset_pointer:'file-service://file-synthetic'}];
+ const image=api.records([input]).messages[0];
+ assert.match(image.md,/\]\(asset:file-synthetic\)/);assert.equal(image.mdEscaped,image.md);
+ assert.equal(image.needsAssets,false);assert.equal(image.images[0].fileId,'file-synthetic');
+});
+test('empty non-asset messages and hidden or non-final plumbing still produce no visible rows',()=>{
+ const hidden=message('hidden','','user');hidden.metadata={is_visually_hidden_from_conversation:true};
+ hidden.content.parts=[{content_type:'image_asset_pointer',asset_pointer:'unknown://synthetic'}];
+ const analysis={...hidden,id:'analysis',metadata:{},author:{role:'assistant'},channel:'analysis'};
+ assert.deepEqual(api.records([message('empty',''),message('space',' \n\t'),hidden,analysis],{allowEmpty:true}),
+   {messages:[],warnings:[]});
+});

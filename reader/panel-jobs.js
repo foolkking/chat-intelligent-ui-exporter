@@ -9,7 +9,11 @@ function jobLabel(j){
   if(j.active&&["reading","uploading"].includes(j.phase)&&j.step)return ReaderProgress.describe(j.step,zh);
   const r=j.result;
   if(j.mode==="append"&&j.phase==="append-ready")return L("所选消息已接收 · 等待确认追加","Selected messages received · review append");
-  if(j.mode==="append"&&j.phase==="append-complete")return L("追加已处理","Append processed");
+  if(j.mode==="append"&&j.phase==="append-complete"){
+    const r=j.appendResult;
+    return r?L(`已追加 ${r.added} 条 · 跳过 ${r.skipped} 条`,`Appended ${r.added} · skipped ${r.skipped}`)+
+      (r.partial||incomplete(j)?L(" · 部分内容"," · partial content"):""):L("追加已处理 · 无结果明细","Append processed · no outcome details");
+  }
   if(j.mode==="append"&&j.phase==="append-attention")return L("追加需要核对","Append needs attention");
   if(j.phase==="done"){
     if(r?.completeness==="partial"||j.partial||Object.values(j.losses||{}).some(Number))return L("部分已保存","Partially saved");
@@ -45,6 +49,16 @@ function lossText(loss){
 function taskBox(j){
   const r=j.result,current=r?.current_project,where=current?projectName(current):"";
   const {box,body}=boxFor(jobLabel(j)+(where?" · "+where:""),warn(j)?"warning":j.phase==="done"?"ok":"clock",warn(j),j.key);
+  if(ReaderProgress.diagnostic(j.diagnostic)||Object.keys(ReaderProgress.accumulate(null,j.stats)).length){
+    const progress=ReaderProgressView({zh});progress.update({...j,taskPhase:j.phase,state:ReaderProgressView.stateForJob(j)});body.append(progress.root);
+    body.append(btn(L("复制诊断信息","Copy diagnostics"),async()=>{
+      const report={version:1,extension:chrome.runtime.getManifest().version,
+        stage:ReaderProgress.snapshot(j.step)?.stage||null,stats:ReaderProgress.accumulate(null,j.stats),
+        diagnostic:ReaderProgress.diagnostic(j.diagnostic),
+        elapsedMs:Number.isSafeInteger(j.startedAt)?Math.max(0,(j.finishedAt||Date.now())-j.startedAt):null};
+      await navigator.clipboard.writeText(JSON.stringify(report,null,2));
+    }));
+  }
   if(j.packageReady&&!j.active){
     body.append(node("p","",L("原导入包保留在本机；继续时先核对收据，不重复读取或新建对话。","The package is retained locally. Resume checks its receipt first; it does not recapture or create another conversation.")));
     body.append(btn(L("继续上传","Resume upload"),()=>cmd({op:"check",key:j.key})),
@@ -81,7 +95,12 @@ function taskBox(j){
       j.phase==="capture-limit"?L("这是旧版插件留下的失败记录，内容未发送。更新 Reader 和插件后，可回原对话重新保存。","This is a previous extension failure; no content was sent. Update Reader and the extension, then save again from the conversation."):
       L("没有保存此版本。请核对来源和目标后，从原对话重试。","This version was not saved. Check the source and destination before retrying.")));
   }else if(j.phase==="reconnect"){body.append(btn(L("打开设置","Open settings"),()=>{if(!$("settings").open)settings($("settings-label"));}));}
-  else if(!j.active&&!["cancelled","result-unavailable"].includes(j.phase)){body.append(btn(L("检查原收据","Check original receipt"),()=>cmd({op:"check",key:j.key})));}
+  else if(!j.active&&!["cancelled","result-unavailable"].includes(j.phase)){
+    const recovery=ReaderProgress.diagnostic(j.diagnostic)?.recovery;
+    if(recovery==="retry_existing"&&caps.import_retry&&j.mode!=="append")
+      body.append(btn(L("继续原导入","Resume original import"),()=>cmd({op:"retry",key:j.key})));
+    else if(recovery!=="system_support")body.append(btn(L("检查原收据","Check original receipt"),()=>cmd({op:"check",key:j.key})));
+  }
   else if(j.active){body.append(node("p","",j.phase==="reading"?L("请保留来源标签页，正在读取正文和附件。","Keep the source tab open while messages and files are read."):L("可以关闭资料库，任务会继续。","You can close the library; the task continues.")));}
   if(warn(j)&&!mustResolve(j))body.append(btn(L("收起提醒","Dismiss notice"),async()=>{
     await session();const {seenWarnings=[]}=await storage.get("seenWarnings");

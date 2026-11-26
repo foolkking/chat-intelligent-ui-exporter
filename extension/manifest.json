@@ -56,6 +56,7 @@
         "jszip.min.js",
         "marked.min.js",
         "fast-text.js",
+        "source-dom.js",
         "dil-render.js",
         "html-export.js",
         "obsidian-send.js",

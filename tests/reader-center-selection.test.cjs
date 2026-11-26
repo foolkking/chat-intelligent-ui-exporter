@@ -172,3 +172,33 @@ test("selection reconciles external Set changes and never retains bodies or sour
   assert.ok(!Object.hasOwn(model.view().rows[0],"body"));
   assert.ok(!Object.hasOwn(model.view().rows[0],"mapping"));
 });
+test("source project navigation is fixed-page too, with duplicate labels still independently addressable",()=>{
+  const rows=Array.from({length:3007},(_,i)=>({id:"id-"+i,title:"Synthetic",group:"project:p"+i}));
+  const model=create({source:archive(rows),groupName:()=>"Same project"});
+  const first=model.groups({page:0}),last=model.groups({page:10000});
+  assert.equal(first.groups.length,50);assert.equal(first.total,3007);
+  assert.equal(last.groups.length,7);assert.equal(last.page,60);
+  assert.equal(first.groups[0].id,"project:p0");assert.equal(last.groups.at(-1).id,"project:p3006");
+  assert.equal(model.groups({query:"not found"}).total,0);
+});
+test("refreshing the same proven web workspace retains only still-present IDs with unchanged membership",()=>{
+  const source={kind:"web",scope:"scope",rows:makeRows()},chosen=new Set(["id-1","id-80","id-149"]);
+  const model=create({source,chosen}),fixed=model.snapshot("page");
+  const rows=makeRows().filter(r=>r.id!=="id-149");rows[80].group="project:changed";
+  rows.push({id:"new",title:"Newly discovered",group:"project:p0"});
+  const refreshed=model.refreshSource({...source,rows,catalog:"new"});
+  assert.deepEqual(refreshed,{retainedCount:1,removedCount:2});
+  assert.deepEqual([...chosen],["id-1"]);assert.equal(model.view().total,150);
+  assert.throws(()=>model.apply(fixed),/selection-stale/);
+  assert.equal(model.project("project:p0").allowed,false);
+});
+test("unknown, different-workspace and invalid refreshes cannot mutate a current selection",()=>{
+  const source={kind:"web",scope:"scope",rows:makeRows()},chosen=new Set(["id-1"]),model=create({source,chosen});
+  for(const next of [{...source,scope:null},{...source,scope:"other"},archive(),
+    {...source,rows:[source.rows[0],source.rows[0]]}]){
+    assert.throws(()=>model.refreshSource(next),/selection-/);
+    assert.deepEqual([...chosen],["id-1"]);assert.equal(model.view().total,150);
+  }
+  const unknown=create({source:{...source,scope:null},chosen});
+  assert.throws(()=>unknown.refreshSource({...source,scope:null}),/selection-source-changed/);
+});

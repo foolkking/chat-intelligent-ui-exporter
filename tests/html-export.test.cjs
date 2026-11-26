@@ -181,6 +181,6 @@ test('the panel offers the HTML export, remembers its form and the background ac
   // The words (language files, then i18n.js) load before every script that shows them.
   const scripts = JSON.parse(fs.readFileSync('extension/manifest.json', 'utf8')).content_scripts[0].js;
   assert.deepEqual(scripts.slice(0, 11), [...['en', 'zh_CN', 'zh_TW', 'ja', 'ko', 'es', 'pt_BR', 'fr', 'de', 'ru'].map(l => `locales/${l}.js`), 'i18n.js']);
-  assert.deepEqual(scripts.slice(11, 16), ['jszip.min.js', 'marked.min.js', 'fast-text.js', 'dil-render.js', 'html-export.js']);
+  assert.deepEqual(scripts.slice(11, 17), ['jszip.min.js', 'marked.min.js', 'fast-text.js', 'source-dom.js', 'dil-render.js', 'html-export.js']);
   assert.match(background, /\(zip\|md\|json\|html\)/);
 });

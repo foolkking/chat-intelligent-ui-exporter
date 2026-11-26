@@ -26,7 +26,7 @@ function fixture(){
       throw Error("Unexpected synthetic request: "+u.pathname);
     }});
   w.Element.prototype.getClientRects=function(){return [{top:0,left:0,bottom:40,right:300,width:300,height:40}];};
-  for(const file of ["extension/locales/en.js","extension/i18n.js","extension/fast-text.js",
+  for(const file of ["extension/locales/en.js","extension/i18n.js","extension/fast-text.js","extension/source-dom.js",
                     "reader/progress.js","reader/visible.js","reader/source-file.js","reader/page-index.js","reader/capture.js"])
     w.eval(fs.readFileSync(path.join(root,file),"utf8"));
   return {w,long,requests,progress,rawBytes:Buffer.byteLength(raw),read:ctl=>overlay.read(ctl,step=>progress.push(step)),close:()=>w.close()};

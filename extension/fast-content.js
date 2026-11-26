@@ -37,12 +37,12 @@
   // Since 2026-11 ChatGPT keeps chats opened before in the page under a display:none wrapper (no hidden or
   // aria-hidden), each with its own messages and input box; a project chat opened by its /c/ link even
   // leaves a hidden copy of itself. Only what is rendered belongs to the chat on screen.
-  const rendered=n=>n.checkVisibility?.()??true;
-  const onScreen=selector=>[...document.querySelectorAll(selector)].filter(rendered);
+  const sourceDOM=globalThis.ChatExportSourceDOM;
+  const onScreen=sourceDOM.all;
   // Since 2026-10 ChatGPT has no data-message-id: each turn lists its message ids in data-chatgpt-search-message-ids (last one is the newest).
-  const lastMessage=()=>{const n=onScreen('[data-message-id],[data-chatgpt-search-message-ids]').filter(n=>!n.closest('[hidden],[aria-hidden="true"]')).at(-1);return n?.getAttribute('data-message-id')||n?.getAttribute('data-chatgpt-search-message-ids')?.trim().split(/\s+/).at(-1);};
+  const lastMessage=sourceDOM.lastMessage;
   // The stop button is now a plain aria-label="Stop" in the composer; a turn being written is data-talvt-turn-state="in_progress" in every language.
-  const streaming=()=>onScreen('[data-testid="stop-button"],button[aria-label="Stop streaming"],button[aria-label="Stop generating"],button[aria-label="停止生成"],form[data-chatgpt-composer] button[aria-label="Stop"],[data-talvt-turn-state="in_progress"]')[0];
+  const streaming=sourceDOM.generating;
   function busy(value){busyFlag=value;for(const id of ['reload','all','mine','answers','invert','none','preview','export','kind','raw','gear','gear2'])$(id).disabled=value;placeDock();if(!value&&host.hidden&&resident&&$('status').textContent)toast($('status').textContent);$('stop').disabled=!value;ui.querySelectorAll('#list input').forEach(n=>n.disabled=value);if(!value)relocalize();}
   function assertCurrent(){if(!state)throw Error(t('err.notRead'));if(state.url!==route())throw Error(t('err.switched'));if(streaming())throw Error(t('err.streaming'));const leaf=lastMessage();if(leaf&&state.leaf&&leaf!==state.leaf&&!state.messages.some(m=>m.id===leaf))throw Object.assign(Error(t('err.branchChanged')),{reread:true});controller?.signal.throwIfAborted();}
   function ids(){return [...ui.querySelectorAll('#list input:checked')].map(n=>n.dataset.messageId);}

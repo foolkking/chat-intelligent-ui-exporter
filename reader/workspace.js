@@ -36,7 +36,10 @@ globalThis.ReaderWorkspace = ({capture,busy}) => {
     }
     for(const a of document.querySelectorAll("nav a[href],aside a[href]")){
       const u=new URL(a.href,location.origin),p=u.origin===location.origin&&ReaderRoutes.projectHome(u.pathname);
-      if(p)groups["project:"+p]=(a.innerText||a.textContent||"").trim().slice(0,160);
+      const name=(a.innerText||a.textContent||"").trim()||a.getAttribute("aria-label")?.trim()||a.title?.trim(),group="project:"+p;
+      if(!p||!name||name===p)continue;
+      if(!Object.hasOwn(groups,group))groups[group]=name;
+      else if(groups[group]!==name)groups[group]=null;
     }
     let owner=null;try{owner=await current();}catch{/* Directory remains browsable; capture stays gated. */}
     if(location.pathname!==path)throw Error("source-changed");

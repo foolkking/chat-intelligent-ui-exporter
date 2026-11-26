@@ -70,6 +70,13 @@ globalThis.ReaderCenterSelection = (() => {
       return {knownCount:rows.length,selectedCount:chosen.size,
         selectedGroupCount:[...groups.values()].filter(g=>g.selectedCount).length,groups:[...groups.values()]};
     }
+    function groups({page=0,query=""}={}) {
+      const q=String(query).trim().toLocaleLowerCase(),items=summary().groups.filter(g=>!q||g.name.toLocaleLowerCase().includes(q));
+      const total=items.length,pages=Math.ceil(total/PAGE_SIZE);
+      page=Math.min(pageNumber(page),Math.max(0,pages-1));
+      return {groups:items.slice(page*PAGE_SIZE,(page+1)*PAGE_SIZE),page,pages,total,
+        hasPrevious:page>0,hasNext:page+1<pages};
+    }
     function project(group) {
       const count=rows.filter(r=>r.group===group).length;
       let reason=null;
@@ -124,8 +131,17 @@ globalThis.ReaderCenterSelection = (() => {
     function clear() {chosen.clear();return summary();}
     // New sources invalidate old confirmations, even if the new file reuses the same ids.
     function replaceSource(next) {install(next);return view();}
+    function refreshSource(next) {
+      // Only a proved, unchanged web workspace can retain draft selections. A
+      // title, entry-project hint or null scope is never an ownership identity.
+      if(current.kind!=="web"||!current.scope||next?.kind!=="web"||next.scope!==current.scope)fail("selection-source-changed");
+      const previous=new Map([...chosen].map(id=>[id,index.get(id)?.group]));
+      install(next,true); // validates the entire replacement before mutating current state
+      for(const id of chosen)if(previous.get(id)!==index.get(id)?.group)chosen.delete(id);
+      return {retainedCount:chosen.size,removedCount:previous.size-chosen.size};
+    }
     install(source,true);
-    return {view,summary,project,snapshot,apply,set,remove,clear,replaceSource,
+    return {view,summary,groups,project,snapshot,apply,set,remove,clear,replaceSource,refreshSource,
       selected:options=>view({...options,group:"",query:"",selectedOnly:true})};
   }
   return {PAGE_SIZE,create};

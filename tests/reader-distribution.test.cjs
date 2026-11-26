@@ -14,7 +14,7 @@ test("the CI reference and private installer are independent of Git checkout lin
   const t=fs.mkdtempSync(path.join(os.tmpdir(),"reader-lines-")),original=build(root,path.join(t,"original"),reference);
   const members=Object.keys(unzipSync(original.bytes)).filter(n=>!["config.js","manifest.json"].includes(n));
   const inputs=["scripts/package-reader.cjs","reader/public-key.txt",...members.map(n=>n==="LICENSE"?n:
-    (/^(?:licenses\/|locales\/|THIRD_PARTY_NOTICES\.md$|fast-text\.js$|i18n\.js$)/.test(n)?"extension/":"reader/")+n)];
+    (/^(?:licenses\/|locales\/|THIRD_PARTY_NOTICES\.md$|fast-text\.js$|source-dom\.js$|i18n\.js$)/.test(n)?"extension/":"reader/")+n)];
   const results=["lf","crlf"].map(mode=>{
     const src=path.join(t,mode);
     for(const rel of inputs){const dest=path.join(src,rel),raw=fs.readFileSync(path.join(root,rel));

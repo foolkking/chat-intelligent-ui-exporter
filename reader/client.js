@@ -88,5 +88,15 @@ globalThis.ReaderClient=(()=>{
       await storage.remove(scopedKeys);await chrome.storage.session.clear();
     });
   }
-  return {connect,pair,disconnect,request,json,trust,access};
+  async function confirmProject(device,name){
+    const state=crypto.randomUUID(),url=new URL("/extension/import-project",READER_ORIGIN);
+    url.hash=new URLSearchParams({state,owner:device.user,device:device.id,name}).toString();
+    const response=await chrome.identity.launchWebAuthFlow({interactive:true,url:url.href});
+    const callback=new URL(response),params=new URLSearchParams(callback.hash.slice(1));
+    if(callback.origin+callback.pathname!==chrome.identity.getRedirectURL("reader-project")||
+      params.get("state")!==state||!/^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(params.get("project")||""))
+      throw Error("Project confirmation was not received.");
+    return params.get("project");
+  }
+  return {connect,pair,disconnect,request,json,trust,access,confirmProject};
 })();

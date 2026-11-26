@@ -8,8 +8,17 @@
   const stepNames=[L("选择来源","Choose source"),L("选择对话","Choose conversations"),L("确认 Reader 目标","Reader destination"),L("查看任务","Import tasks")];
   let step=0,source=null,chosen=new Set(),page=0,selectionModel,device=null,projects=[],plan=null,running=false,stop=false,reading=false,readVersion=0,ownerChanged=false;
   let pairTimer,taskTimer,sourceDirName,mappings={},mappingScope="",bindingRun=0,targetRun=0,taskPage=0;
+  let targetsReady=false,webProject=false,mappingRevision=0;
+  const projectDrafts=new Map();
+  let activeGroup="",projectPage=0,collapsed=false,sourceRun=0,refreshing=false,sourceBlocked=false;
+  const projectNodes=new Map(),wide=matchMedia("(min-width:661px)");
   const root=navigator.storage.getDirectory();
-  const tabHint=Number(new URLSearchParams(location.search).get("tab"));
+  const frame=globalThis.ReaderFrameContext,embedded=frame?.view==="import"&&Number.isSafeInteger(frame.tab)&&frame.tab>=0;
+  const tabHint=embedded?frame.tab:Number(new URLSearchParams(location.search).get("tab"));
+  if(embedded){
+    document.documentElement.dataset.readerFrame="import";
+    document.querySelector(".center-head").hidden=true;
+  }
   ChatExportI18n.setLocale("en");document.documentElement.lang=zh?"zh-CN":"en";
   const labels={
     heading:["导入到 Reader","Import to Reader"],"library-link":["Reader 资料库","Reader library"],
@@ -19,7 +28,10 @@
     "archive-note":["在本机读取 ZIP；只有确认后的对话及所选附件会发送到 Reader。","Read ZIP locally. Only confirmed conversations and selected files are sent to Reader."],
     "file-copy":["选择 ZIP 或 conversations.json","Choose ZIP or conversations.json"],
     "selection-heading":["选择要保存的对话","Choose conversations to save"],"group-label":["ChatGPT 来源项目","ChatGPT source project"],
-    "query-label":["按来源标题筛选","Filter source titles"],"select-visible":["选择筛选结果","Select filtered results"],"clear-selection":["清空勾选","Clear selection"],
+    "query-label":["按来源标题筛选","Filter source titles"],"clear-selection":["清空勾选","Clear selection"],
+    "refresh-source":["刷新来源","Refresh source"],"return-selection":["返回当前勾选","Return to selection"],
+    "project-query-label":["查找来源项目","Find source project"],"project-prev":["上一页项目","Previous projects"],"project-next":["下一页项目","Next projects"],
+    "selection-more-label":["选择操作","Selection actions"],"saved-state-note":["Reader 保存状态未核对","Reader saved state not checked."],
     "source-more":["下一页","Next page"],"back-source":["重新选择来源","Choose another source"],"to-target":["选择 Reader 目标","Choose Reader destination"],
     "target-heading":["确认 Reader 保存位置","Confirm Reader destination"],"mode-label":["项目对应方式","Project mapping"],
     "include-files-label":["正文及可取得的附件原文件","Messages and available original files"],"remember-label":["记住此来源与当前 Reader 账号的项目映射","Remember this mapping for this source and Reader account"],
@@ -42,8 +54,12 @@
   $("task-filter").setAttribute("aria-label",L("任务状态","Task state"));
   $("steps").setAttribute("aria-label",L("导入步骤","Import steps"));
   $("source-query").placeholder=L("搜索对话标题…","Search conversation titles…");
+  $("project-query").placeholder=L("查找来源项目…","Find source project…");
   $("pair-reader").href=READER_ORIGIN+"/extension/devices";$("new-project").href=READER_ORIGIN+"/";
-  $("library-link").onclick=()=>chrome.tabs.create({url:chrome.runtime.getURL("panel.html")});
+  $("library-link").onclick=()=>embedded?work(async()=>{
+    const r=await chrome.runtime.sendMessage({kind:"frame-view",view:"library"});
+    if(!r?.ok)throw Error("source-changed");
+  }):chrome.tabs.create({url:chrome.runtime.getURL("panel.html")});
   $("target-mode").replaceChildren(new Option(L("全部保存到一个项目","One destination for all"),"one"),new Option(L("按来源项目分别选择","Map source projects separately"),"groups"));
   const errors={
     "archive-format":L("导出包损坏或含不安全的归档条目，未发送。","The archive is damaged or contains unsafe members. Nothing was sent."),
@@ -66,20 +82,73 @@
   async function work(fn){$("error").textContent="";try{await fn();}catch(e){if(e.name!=="AbortError")failure(e);}}
   const display=ReaderProgress.throttle(p=>$("activity").textContent=ReaderProgress.describe(p,zh));
   function show(n){step=n;for(const [i,id] of ["source-step","selection-step","target-step","tasks-step"].entries())$(id).hidden=i!==n;
+    const library=$("library-link");
     $("steps").replaceChildren(...stepNames.map((name,i)=>{const x=el("span",`${i+1}  ${name}`);if(i===n)x.setAttribute("aria-current","step");return x;}));
+    if(embedded)$("steps").append(library);
     $("activity").textContent="";$("error").textContent="";const h=document.querySelector("section:not([hidden])>h2");h?.setAttribute("tabindex","-1");h?.focus({preventScroll:true});
   }
   function groupName(g){
     if(g==="unknown")return L("归属未知","Membership unknown");if(g==="unclassified")return L("未归类","Unclassified");
     return source?.groups?.[g]||L("来源项目 ","Source project ")+g.replace(/^project:/,"");
   }
-  const selectionOptions=()=>({query:$("source-query").value,group:$("source-group").value,page,
+  const selectionOptions=()=>({query:$("source-query").value,group:activeGroup,page,
     selectedOnly:$("selection-view").value==="selected"});
+  function projectLayout(){
+    const pane=$("conversation-pane"),review=$("selection-view").value==="selected",key=review?"":activeGroup;
+    const anchor=projectNodes.get(key)||projectNodes.get(""),focused=document.activeElement;
+    const parent=wide.matches?document.querySelector(".catalogue-layout"):anchor?.li;
+    if(parent&&pane.parentElement!==parent)parent.append(pane);
+    pane.hidden=!wide.matches&&collapsed&&!review;
+    for(const [group,n] of projectNodes){
+      const active=group===key;
+      n.button.setAttribute("aria-current",String(active));
+      if(wide.matches)n.button.removeAttribute("aria-expanded");
+      else n.button.setAttribute("aria-expanded",String(active&&!pane.hidden));
+    }
+    if(focused&&pane.contains(focused)&&!pane.hidden)focused.focus({preventScroll:true});
+    document.querySelector(".catalogue-layout").dataset.wide=String(wide.matches);
+  }
+  function chooseGroup(group,toggle=false){
+    const same=group===activeGroup&&$("selection-view").value!=="selected";
+    collapsed=toggle&&!wide.matches&&same?!collapsed:false;activeGroup=group;
+    if(!same)page=0;
+    $("selection-view").value="all";$("source-query").disabled=$("source-group").disabled=false;
+    selection(); // no checkbox or source-read side effects
+  }
+  function projectList(){
+    // Both columns and compact accordions reuse one pane; never clone its rows.
+    const pane=$("conversation-pane");document.querySelector(".catalogue-layout").append(pane);
+    const summary=selectionModel.summary(),v=selectionModel.groups({page:projectPage,query:$("project-query").value});
+    projectPage=v.page;projectNodes.clear();
+    const entries=[{id:"",name:L("全部已发现对话","All discovered conversations"),knownCount:summary.knownCount,selectedCount:summary.selectedCount},...v.groups];
+    $("project-groups").replaceChildren(...entries.map(g=>{
+      const li=el("li"),line=el("div",null,"project-line"),button=el("button"),check=document.createElement("input");
+      li.dataset.group=button.dataset.group=g.id;button.type="button";button.setAttribute("aria-controls","conversation-pane");check.type="checkbox";
+      const name=el("span",g.name,"project-name"),count=el("span",null,"project-count");button.append(name,count);
+      button.onclick=()=>chooseGroup(g.id,true);
+      check.onchange=()=>work(()=>{selectionModel.apply(selectionModel.snapshot("filtered",{group:g.id}),{selected:check.checked});selection();});
+      const target=el("label",null,"project-select");target.append(check);
+      line.append(target,button);li.append(line);projectNodes.set(g.id,{li,button,check,count,name:g.name});return li;
+    }));
+    // The compact select is a shortcut for this project page, not an unbounded
+    // second copy of a large directory. The active off-page choice remains named.
+    const choices=[...entries];
+    if(activeGroup&&!choices.some(g=>g.id===activeGroup)){
+      const active=summary.groups.find(g=>g.id===activeGroup);if(active)choices.push(active);
+    }
+    $("source-group").replaceChildren(...choices.map(g=>new Option(g.name,g.id)));$("source-group").value=activeGroup;
+    $("project-prev").disabled=!v.hasPrevious;$("project-next").disabled=!v.hasNext;
+    $("project-prev").parentElement.hidden=v.pages<2;
+    $("project-page-status").textContent=L(`${v.total?projectPage+1:0} / ${v.pages}`,`${v.total?projectPage+1:0} / ${v.pages}`);
+    projectLayout();
+  }
   function selection(){
     const options=selectionOptions(),v=options.selectedOnly?selectionModel.selected({page}):selectionModel.view(options);
+    $("source-group").value=options.selectedOnly?"":activeGroup;
     page=v.page;
     $("source-rows").replaceChildren(...v.rows.map(row=>{
       const li=el("li"),label=el("label"),check=document.createElement("input"),copy=el("span",null,"item-copy");check.type="checkbox";check.checked=chosen.has(row.id);
+      li.dataset.id=row.id;
       check.onchange=()=>{
         const index=v.rows.indexOf(row),focused=document.activeElement===check;
         selectionModel.set(row.id,check.checked);
@@ -97,53 +166,72 @@
     $("source-page-status").textContent=L(`${v.from}–${v.to} / ${v.total} 条`,`${v.from}–${v.to} of ${v.total}`);
     $("select-visible").disabled=$("select-page").disabled=!v.total;
     $("select-page").textContent=L(`选择本页 ${v.rows.length} 条`,`Select page (${v.rows.length})`);
-    $("select-visible").textContent=L(`选择${options.selectedOnly?"已选列表":"筛选结果"} ${v.total} 条`,`Select ${options.selectedOnly?"selected list":"filtered results"} (${v.total})`);
+    $("scope-label").textContent=options.selectedOnly?L(`已选清单（${v.total} 条）`,`Selected list (${v.total})`):
+      L(`全选当前已发现范围（${v.total} 条）`,`Select discovered range (${v.total})`);
     $("select-page").onclick=()=>{selectionModel.apply(selectionModel.snapshot("page",options.selectedOnly?{selectedOnly:true,page}:options));selection();};
-    $("select-visible").onclick=()=>{selectionModel.apply(selectionModel.snapshot("filtered",options.selectedOnly?{selectedOnly:true}:options));selection();};
+    $("select-visible").onchange=()=>work(()=>{selectionModel.apply(selectionModel.snapshot("filtered",options.selectedOnly?{selectedOnly:true}:options),
+      {selected:$("select-visible").checked});selection();});
     const proof=selectionModel.project(options.group);
     $("select-project").hidden=!options.group.startsWith("project:")||options.selectedOnly;
     $("select-project").disabled=!proof.allowed;
     $("select-project").textContent=proof.allowed?L(`选择此导出包内整个项目（${proof.count} 条）`,`Select this export's entire project (${proof.count})`):
       L("目录或归属未完整核实，不能选整个项目","Entire project unavailable: directory or membership is incomplete");
     $("select-project").onclick=()=>{selectionModel.apply(selectionModel.snapshot("project",options));selection();};
-    $("source-status").textContent=source?.kind==="archive"?L(`导出包中 ${source.rows.length} 条；项目归属以文件中的明确记录为准。`,`${source.rows.length} conversations in export; project membership requires explicit metadata.`):
-      L(`已发现 ${source?.rows.length||0} 条 · 部分目录，不代表整个账号或项目`,`${source?.rows.length||0} discovered · partial directory, not an entire account or project`);
-    $("group-summary").textContent=L(`当前范围 ${v.total} 条`,`${v.total} in this scope`);counts();
+    const unknown=selectionModel.summary().groups.find(g=>g.id==="unknown")?.knownCount||0;
+    $("source-status").textContent=(source?.kind==="archive"?L(`导出包中 ${source.rows.length} 条；项目归属以文件中的明确记录为准。`,`${source.rows.length} conversations in export; project membership requires explicit metadata.`):
+      L(`已发现 ${source?.rows.length||0} 条 · 部分目录，不代表整个账号或项目`,`${source?.rows.length||0} discovered · partial directory, not an entire account or project`))+
+      (unknown?L(` · ${unknown} 条归属未知（不等于未归类）`,` · ${unknown} membership unknown (not unclassified)`):"");
+    $("selection-empty").hidden=!!v.total;$("selection-empty").textContent=options.selectedOnly?L("尚未勾选对话。","No conversations selected."):L("此范围没有匹配的已发现对话。","No discovered conversations match this scope.");
+    counts();projectLayout();
   }
   function counts(){
-    const summary=selectionModel.summary();
+    const summary=selectionModel.summary(),options=selectionOptions(),v=options.selectedOnly?selectionModel.selected({page}):selectionModel.view(options);
     $("selected-count").textContent=L(`已勾选 ${chosen.size} 条 · ${summary.selectedGroupCount} 个来源分组`,`${chosen.size} selected · ${summary.selectedGroupCount} source groups`);
-    $("to-target").disabled=!chosen.size||source?.kind==="web"&&!source.scope;
-    for(const g of summary.groups){const o=[...$("source-group").options].find(o=>o.value===g.id);
-      if(o)o.textContent=`${g.name} (${g.selectedCount}/${g.knownCount})`;}
+    $("group-summary").textContent=L(`已选 ${v.selectedInFilter} 条`,`${v.selectedInFilter} selected`);
+    $("select-visible").checked=v.total>0&&v.selectedInFilter===v.total;
+    $("select-visible").indeterminate=v.selectedInFilter>0&&v.selectedInFilter<v.total;
+    $("to-target").disabled=refreshing||sourceBlocked||!chosen.size||source?.kind==="web"&&!source.scope;
+    const byID=new Map(summary.groups.map(g=>[g.id,g]));byID.set("",{knownCount:summary.knownCount,selectedCount:summary.selectedCount});
+    for(const [id,n] of projectNodes){const g=byID.get(id);n.count.textContent=`${g.selectedCount}/${g.knownCount}`;
+      n.check.checked=g.knownCount>0&&g.knownCount===g.selectedCount;n.check.indeterminate=g.selectedCount>0&&g.selectedCount<g.knownCount;
+      n.check.setAttribute("aria-label",L(`选择${n.name}中已发现的 ${g.knownCount} 条`,`Select ${g.knownCount} discovered in ${n.name}`));}
+    for(const o of $("source-group").options){const g=byID.get(o.value);if(g)o.textContent=`${o.value?groupName(o.value):L("全部来源项目","All source projects")} (${g.selectedCount}/${g.knownCount})`;}
   }
   function catalogue(){
-    chosen.clear();page=0;$("source-query").value="";$("selection-view").value="all";
+    chosen.clear();page=projectPage=0;collapsed=sourceBlocked=false;activeGroup="";$("source-query").value=$("project-query").value="";$("selection-view").value="all";
+    $("refresh-status").textContent="";
+    $("source-label").textContent=source.kind==="web"?L("ChatGPT 来源","ChatGPT source"):L("本机导出包","Local export");
+    $("refresh-source").hidden=source.kind!=="web";$("return-selection").hidden=false;
     $("source-group").disabled=$("source-query").disabled=false;
     selectionModel=ReaderCenterSelection.create({source,chosen,groupName});
-    const groups=[...new Set(source.rows.map(r=>r.group))];$("source-group").replaceChildren(new Option(L("全部来源项目","All source projects"),""),...groups.map(g=>new Option(groupName(g),g)));
+    const groups=selectionModel.summary().groups.map(g=>g.id);
     const validHint=source.kind==="web"&&source.scope&&source.hint&&groups.includes(source.hint);
-    if(validHint)$("source-group").value=source.hint;
-    show(1);selection();
+    if(validHint){activeGroup=source.hint;projectPage=Math.floor(groups.indexOf(activeGroup)/ReaderCenterSelection.PAGE_SIZE);}
+    projectList();show(1);selection();
     if(source.hint&&!validHint)$("source-status").textContent+=" · "+L("项目提示未核实，已显示全部已发现对话","Project hint unverified; showing all discovered conversations");
   }
   async function clearSource(){
-    readVersion++;bindingRun++;targetRun++;source=null;mappings={};mappingScope="";
+    readVersion++;sourceRun++;bindingRun++;targetRun++;source=null;selectionModel=null;chosen.clear();mappings={};mappingScope="";
+    refreshing=sourceBlocked=false;$("refresh-source").disabled=false;$("return-selection").hidden=true;
     if($("bindings-status"))$("bindings-status").textContent="";
     if(sourceDirName){const key=sourceDirName;sourceDirName=null;await (await root).removeEntry(key,{recursive:true}).catch(()=>{});}
   }
   async function pick(file,resume=false){
-    if(!file||running||reading)return;reading=true;ownerChanged=false;const existing=plan;
+    if(!file||running||reading)return;reading=true;sourceRun++;ownerChanged=false;const existing=plan;
     const version=++readVersion,check=()=>{if(version!==readVersion)throw new DOMException("Cancelled","AbortError");};
     $("source-file").disabled=$("resume-file").disabled=true;
     const name="reader-catalogue-"+crypto.randomUUID(),dir=await (await root).getDirectoryHandle(name,{create:true});
     try{
       const parsed=await ReaderLocalArchive.open(file,dir,check,display.update);check();
       if(resume&&(!existing||existing.source.kind!=="archive"||existing.source.scope!==parsed.digest))throw Error("source-changed");
-      if(sourceDirName)await (await root).removeEntry(sourceDirName,{recursive:true}).catch(()=>{});
-      sourceDirName=name;source={...parsed,kind:"archive",scope:parsed.digest};
+      const next={...parsed,kind:"archive",scope:parsed.digest};
+      // Validate the new catalogue before releasing the draft's OPFS directory.
+      if(!resume)ReaderCenterSelection.create({source:next});
+      const previous=sourceDirName;
+      sourceDirName=name;source=next;mappings={};mappingScope="";
       if(resume){$("source-needed").hidden=$("resume-file-label").hidden=true;$("activity").textContent=L("已核实原导出包，可继续。","Original export verified. Ready to resume.");}
       else catalogue();
+      if(previous)await (await root).removeEntry(previous,{recursive:true}).catch(()=>{});
     }catch(e){await (await root).removeEntry(name,{recursive:true}).catch(()=>{});throw e;}
     finally{reading=false;$("source-file").disabled=$("resume-file").disabled=false;display.flush();}
   }
@@ -151,59 +239,162 @@
   $("resume-file").onchange=()=>work(()=>pick($("resume-file").files[0],true));
   $("source-query").oninput=()=>{page=0;selection();};$("source-query").oncompositionstart=()=>{$("source-query").oninput=null;};
   $("source-query").oncompositionend=()=>{$("source-query").oninput=()=>{page=0;selection();};page=0;selection();};
-  $("source-group").onchange=()=>{page=0;selection();};$("source-more").onclick=()=>{page++;selection();};$("source-prev").onclick=()=>{page=Math.max(0,page-1);selection();};
+  $("source-group").onchange=()=>chooseGroup($("source-group").value);$("source-more").onclick=()=>{page++;selection();};$("source-prev").onclick=()=>{page=Math.max(0,page-1);selection();};
+  function projectPageAt(n,restoreFocus=false){
+    projectPage=n;projectList();
+    // When the browsed project page changes, compact view must not show the
+    // prior project's conversations under an unrelated group label.
+    if(!wide.matches&&!projectNodes.has(activeGroup)){activeGroup="";page=0;collapsed=true;}
+    selection();
+    if(restoreFocus)(projectNodes.get(activeGroup)||projectNodes.get("")).button.focus({preventScroll:true});
+  }
+  $("project-prev").onclick=()=>projectPageAt(projectPage-1,true);
+  $("project-next").onclick=()=>projectPageAt(projectPage+1,true);
+  $("project-query").oninput=()=>projectPageAt(0);
+  wide.addEventListener("change",()=>{
+    if(!selectionModel||step!==1)return;
+    if(!wide.matches&&!projectNodes.has(activeGroup)){
+      $("project-query").value="";
+      const i=selectionModel.summary().groups.findIndex(g=>g.id===activeGroup);
+      projectPage=Math.max(0,Math.floor(i/ReaderCenterSelection.PAGE_SIZE));projectList();counts();
+    }
+    projectLayout();
+  });
   $("selection-view").replaceChildren(new Option(L("全部目录","All discovered"),"all"),new Option(L("查看已选","Review selected"),"selected"));
-  $("selection-view").onchange=()=>{page=0;$("source-group").disabled=$("source-query").disabled=$("selection-view").value==="selected";selection();};
-  $("clear-selection").onclick=()=>{selectionModel.clear();selection();};$("back-source").onclick=()=>work(async()=>{await clearSource();show(0);await resumeBox();});
-  $("back-selection").onclick=()=>{bindingRun++;clearInterval(pairTimer);show(1);selection();};
+  $("selection-view").onchange=()=>{page=0;collapsed=false;$("source-group").disabled=$("source-query").disabled=$("selection-view").value==="selected";selection();};
+  $("clear-selection").onclick=()=>{selectionModel.clear();selection();};
+  function cancelRefresh(){
+    if(refreshing){
+      sourceBlocked=true;
+      $("refresh-status").textContent=L("刷新已取消，原目录及勾选保留；请重新核实来源后继续。","Refresh cancelled. Original directory and selections retained; verify source again before continuing.");
+    }
+    refreshing=false;$("refresh-source").disabled=false;
+  }
+  $("back-source").onclick=()=>work(async()=>{
+    sourceRun++;cancelRefresh();$("web-tabs").hidden=true;
+    $("return-selection").textContent=L(`返回当前勾选（${chosen.size} 条）`,`Return to selection (${chosen.size})`);
+    show(0);await resumeBox();
+  });
+  $("return-selection").onclick=()=>{if(!source||!selectionModel)return;sourceRun++;readVersion++;show(1);selection();};
+  $("back-selection").onclick=()=>{bindingRun++;targetRun++;targetsReady=false;releaseProjectWindows();clearInterval(pairTimer);show(1);selection();};
   async function current(){
     await ReaderClient.trust;const d=(await storage.get("device")).device;
     if(d?.origin!==READER_ORIGIN)return null;return d;
   }
+  function rememberedTargets(saved){
+    const targets={...saved};
+    if(source.kind!=="web")return targets;
+    // Older web catalogues keyed some groups by a URL slug. Restore an explicit
+    // choice (including Unclassified), but never choose between conflicting ones.
+    const byId=new Map();
+    for(const [key,target] of Object.entries(saved)){
+      const id=key.startsWith("project:")&&ReaderRoutes.projectId(key.slice(8));
+      if(!id)continue;
+      const previous=byId.get(id),value=target||"";
+      byId.set(id,previous!==undefined&&previous!==value?"unavailable":value);
+    }
+    for(const [id,target] of byId)targets["project:"+id]=target;
+    return targets;
+  }
   async function targets(){
-    const n=++targetRun;bindingRun++;if($("bindings-status"))$("bindings-status").textContent="";
-    device=await current();$("account").textContent=device?String(device.name||L("已连接","Connected"))+" · "+READER_ORIGIN:READER_ORIGIN;
-    $("pair-start").hidden=!!device;$("targets").hidden=!device;$("confirm-import").disabled=true;
-    if(!device)return;
-    const owner=device,sourceScope=source?.scope;
+    const n=++targetRun,snapshot=source;bindingRun++;targetsReady=false;
+    $("confirm-import").disabled=$("target-mode").disabled=$("target-mappings").inert=true;
+    if($("bindings-status"))$("bindings-status").textContent="";
+    const owner=await current();if(n!==targetRun||step!==2||source!==snapshot)return;
+    device=owner;$("account").textContent=device?String(device.name||L("已连接","Connected"))+" · "+READER_ORIGIN:READER_ORIGIN;
+    $("pair-start").hidden=!!device;$("targets").hidden=!device;
+    if(!device||!snapshot)return;
+    const sourceScope=snapshot.scope,ownerScope=JSON.stringify([READER_ORIGIN,owner.id,owner.user,sourceScope]);
+    if(mappingScope!==ownerScope){$("target-mappings").replaceChildren();projectDrafts.clear();}
     const caps=await (await ReaderClient.request(owner.id,"capabilities")).json();
     if(caps.protocol!==1||caps.import_profile!=="reader-chat-v1"||!caps.capture||!caps.resumable_capture)throw Error("upgrade-required");
     const loaded=await (await ReaderClient.request(owner.id,"projects")).json();
-    const d=await current();if(n!==targetRun)return;
-    if(d?.id!==owner.id||d.user!==owner.user||source?.scope!==sourceScope)throw Error("owner-changed");
-    projects=loaded;
     const {destination,batchMappings=[]}=await storage.get(["destination","batchMappings"]);
+    const d=await current();if(n!==targetRun||step!==2||source!==snapshot)return;
+    if(d?.id!==owner.id||d.user!==owner.user)throw Error("owner-changed");
+    projects=loaded.filter(p=>uuid(p.id)&&typeof p.name==="string"&&!p.default);
+    webProject=caps.web_import_project===true;
     const saved=batchMappings.find(m=>m.origin===READER_ORIGIN&&m.user===device.user&&m.source===source.scope);
-    const ownerScope=JSON.stringify([READER_ORIGIN,owner.id,owner.user,sourceScope]);
     if(mappingScope!==ownerScope){
-      const defaultProject=destination?.device===device.id?destination.project||"":"";mappings=saved?.targets?{...saved.targets}:{"*":defaultProject};
+      const defaultProject=destination?.device===device.id?destination.project||"":"";mappings=saved?.targets?rememberedTargets(saved.targets):{"*":defaultProject};
       mappingScope=ownerScope;$("target-mode").value="groups";
       $("include-files").checked=destination?.device===device.id?!destination.textOnly:true;$("remember-mapping").checked=false;
     }
     if($("check-bindings")){$("check-bindings").hidden=!caps.source_lookup;$("check-bindings").disabled=false;
       $("check-bindings").textContent=L(`核对已选 ${chosen.size} 条的已有绑定`,`Check saved references for ${chosen.size} selected conversations`);}
+    for(const [group,draft] of projectDrafts){
+      if(!draft.result&&!draft.legacy)continue;
+      const matches=projects.filter(p=>p.name===draft.name.trim()&&(!draft.result||p.id===draft.result));
+      if(matches.length===1){mappings[group]=matches[0].id;projectDrafts.delete(group);}
+      else if(draft.result)draft.note=L("项目已变更，请重新选择保存位置。","Project changed. Choose a destination again.");
+    }
+    targetsReady=true;$("target-mode").disabled=$("target-mappings").inert=false;
     renderTargets();
   }
-  function renderTargets(){
-    const selected=source.rows.filter(r=>chosen.has(r.id)),groups=$("target-mode").value==="one"?["*"]:[...new Set(selected.map(r=>r.group))];
+  function releaseProjectWindows(){
+    for(const [group,draft] of projectDrafts){
+      if(draft.busy||draft.legacy||draft.result)projectDrafts.set(group,{name:draft.name});
+    }
+  }
+  async function confirmProject(group,draft){
+    const owner=device,snapshot=source,scope=mappingScope,wanted=draft.name.trim();
+    const live=()=>step===2&&source===snapshot&&mappingScope===scope&&device?.id===owner.id&&device.user===owner.user&&projectDrafts.get(group)===draft;
+    if(!targetsReady||!wanted||Array.from(wanted).length>120||draft.busy||!live())return;
+    draft.busy=true;
+    try{
+      const now=await current();if(!live()||now?.id!==owner.id||now.user!==owner.user)return;
+      const exact=projects.find(p=>p.name===wanted);
+      if(exact&&(!draft.result||draft.result===exact.id)){mappings[group]=exact.id;projectDrafts.delete(group);renderTargets(group);return;}
+      renderTargets();
+      if(webProject){
+        const result=await ReaderClient.confirmProject(owner,wanted);
+        if(!live()||!uuid(result))return;
+        draft.result=result;
+      }else if(!draft.legacy){
+        await chrome.tabs.create({url:READER_ORIGIN+"/"});if(!live())return;
+        draft.legacy=true;
+        draft.note=L(`在 Reader 侧栏新建「${wanted}」，然后返回刷新项目。`,`Create “${wanted}” in the Reader sidebar, then return and refresh projects.`);
+        return;
+      }
+      await targets();
+    }catch{
+      if(live())draft.note=L("尚未核实新项目。请刷新项目核对结果，或重新打开 Reader 确认。","Project not confirmed. Refresh projects to check the result, or reopen confirmation in Reader.");
+    }finally{
+      draft.busy=false;
+      if(live())renderTargets(group,"button[type=submit]");
+      else if(step===2&&source===snapshot&&mappingScope===scope&&mappings[group]===draft.result)focusMapping(group);
+    }
+  }
+  function focusMapping(group,selector="select"){
+    const row=[...$("target-mappings").children].find(line=>line.dataset.group===group);
+    row?.querySelector(selector)?.focus({preventScroll:true});
+  }
+  function renderTargets(focus,selector){
+    mappingRevision++;
+    const samples=new Map();
+    for(const r of source.rows)if(chosen.has(r.id)&&!samples.has(r.group))samples.set(r.group,r.title);
+    const groups=$("target-mode").value==="one"?["*"]:[...samples.keys()];
     $("target-mappings").replaceChildren(...groups.map((g,i)=>{
-      const line=el("div",null,"mapping-row"),label=el("label",g==="*"?L("全部已选对话","All selected conversations"):groupName(g)),select=document.createElement("select");
-      select.id="mapping-"+i;label.htmlFor=select.id;select.replaceChildren(new Option(L("Reader · 未归类","Reader · Unclassified"),""),
-        ...projects.filter(p=>!p.default).map(p=>new Option("Reader · "+p.name,p.id)));
-      const value=mappings[g]??mappings["*"]??"";
-      if(value&&!projects.some(p=>p.id===value&&!p.default)){const unavailable=new Option(L("项目不可用，请重新选择","Project unavailable — choose again"),"unavailable");unavailable.disabled=true;select.append(unavailable);select.value="unavailable";}
-      else select.value=value;
-      mappings[g]=select.value;
-      select.onchange=()=>{mappings[g]=select.value;confirmCopy();};line.append(label,el("span","→"),select);return line;
+      const rawName=source.groups?.[g],name=g.startsWith("project:")&&typeof rawName==="string"&&rawName.trim()!==g.slice(8)?rawName.trim():"";
+      const value=(Object.hasOwn(mappings,g)?mappings[g]:mappings["*"])||"";
+      mappings[g]=value;
+      const draft=projectDrafts.get(g),line=ReaderProjectRow({id:"mapping-"+i,name,projects,value,draft,webCreate:webProject,L,
+        label:g==="*"?L("全部已选对话","All selected conversations"):groupName(g),
+        sample:g.startsWith("project:")&&!name?samples.get(g):"",
+        selectValue:next=>{if(!targetsReady||!line.isConnected)return;projectDrafts.delete(g);mappings[g]=next;renderTargets(g);},
+        edit:()=>{if(!targetsReady||!line.isConnected)return;projectDrafts.set(g,{name});renderTargets(g,"input");},
+        cancel:()=>{projectDrafts.delete(g);renderTargets(g);},
+        submit:()=>confirmProject(g,draft)});
+      line.dataset.group=g;return line;
     }));
-    $("confirm-import").disabled=false;confirmCopy();
+    confirmCopy();if(focus)focusMapping(focus,selector);
   }
   function confirmCopy(){
-    $("confirm-import").disabled=!chosen.size||[...$("target-mappings").querySelectorAll("select")].some(s=>s.value==="unavailable");
+    $("confirm-import").disabled=!targetsReady||!chosen.size||!!$("target-mappings").querySelector('[data-ready="false"]');
     const n=chosen.size;$("confirm-summary").textContent=L(`确认后按此目标逐条处理 ${n} 条对话。已保存的对话不会因此被移动。`,`Process ${n} conversations one at a time with these destinations. Existing records will not be moved.`);
     $("confirm-import").textContent=L(`确认导入 ${n} 条对话`,`Import ${n} conversations`);
   }
-  $("to-target").onclick=()=>work(async()=>{show(2);await targets();});
+  $("to-target").onclick=()=>work(async()=>{if($("to-target").disabled)return;show(2);await targets();});
   if($("check-bindings"))$("check-bindings").onclick=()=>work(async()=>{
     if($("check-bindings").disabled)return;
     const snapshot=source,owner=await current(),ids=source.rows.filter(r=>chosen.has(r.id)).map(r=>r.id),n=++bindingRun;
@@ -226,7 +417,7 @@
       }
     }finally{if(n===bindingRun)$("check-bindings").disabled=false;}
   });
-  $("target-mode").onchange=renderTargets;$("reload-projects").onclick=()=>work(targets);
+  $("target-mode").onchange=()=>{releaseProjectWindows();renderTargets();};$("reload-projects").onclick=()=>work(targets);
   async function pairing(action){
     const p=await ReaderClient.pair(action);$("pair-info").hidden=!p||!!p.connected;
     $("short-code").textContent=p?.code||"";
@@ -276,19 +467,24 @@
     if(!r?.ok)throw Error(r?.error||L("未确认操作。请检查原收据。","Operation unconfirmed. Check the original receipt."));
   }
   $("confirm-import").onclick=()=>work(async()=>{
-    if(running||!chosen.size)return;const d=await current();if(d?.id!==device?.id)throw Error("owner-changed");
+    if(running||step!==2||$("confirm-import").disabled)return;
+    const snapshot=source,epoch=targetRun,revision=mappingRevision,scope=mappingScope,d=await current();
+    const stillConfirmed=()=>step===2&&source===snapshot&&epoch===targetRun&&revision===mappingRevision&&scope===mappingScope&&!$("confirm-import").disabled;
+    if(!stillConfirmed())return;
+    if(!d||d.id!==device?.id||d.user!==device.user)throw Error("owner-changed");
     const rows=source.rows.filter(r=>chosen.has(r.id)),fixed={};for(const row of rows)fixed[row.group]=mappings[$("target-mode").value==="one"?"*":row.group]||null;
     const next=ReaderBatch.create({device:d,origin:READER_ORIGIN,source:{kind:source.kind,scope:source.scope,...(source.kind==="web"?{catalog:source.catalog,tab:source.tab}: {})},rows,targets:fixed,attachments:$("include-files").checked});
     await navigator.locks.request("reader-batch-plan",async()=>{
       const {device:now,batchPlan:previous,jobs=[]}=await storage.get(["device","batchPlan","jobs"]);
       if(now?.id!==d.id||now.user!==d.user||now.origin!==READER_ORIGIN)throw Error("owner-changed");
+      if(!stillConfirmed())throw Error("source-changed");
       if(previous&&previous.id!==plan?.id)throw Error("queue-open");
       if(previous?.items.some(i=>!i.cancelled&&!i.skipped&&(!ReaderBatch.success(jobs.find(j=>j.key===i.key&&j.device===previous.device)))))throw Error("plan-retained");
       await storage.set({batchPlan:next});
     });plan=next;
     if($("remember-mapping").checked){const {batchMappings=[]}=await storage.get("batchMappings");
-      await storage.set({batchMappings:[...batchMappings.filter(m=>!(m.origin===READER_ORIGIN&&m.user===d.user&&m.source===source.scope)),
-        {origin:READER_ORIGIN,user:d.user,source:source.scope,targets:fixed}]});}
+      await storage.set({batchMappings:[...batchMappings.filter(m=>!(m.origin===READER_ORIGIN&&m.user===d.user&&m.source===snapshot.scope)),
+        {origin:READER_ORIGIN,user:d.user,source:snapshot.scope,targets:fixed}]});}
     show(3);await renderTasks();await runQueue();
   });
   async function stage(item){
@@ -485,17 +681,53 @@
     await storage.remove("batchPlan");plan=null;await clearSource();show(0);await resumeBox();
   });
   async function chooseWeb(container,accept){
-    const r=await chrome.runtime.sendMessage({kind:"batch-tabs"});if(r?.error)throw Error(r.error);
+    const n=++sourceRun,atStep=step;let discovery=0;
+    const check=()=>{if(n!==sourceRun||step!==atStep)throw new DOMException("Cancelled","AbortError");};
+    const r=await chrome.runtime.sendMessage({kind:"batch-tabs"});check();if(r?.error)throw Error(r.error);
     const tabs=[...(r?.tabs||[])].sort((a,b)=>Number(b.id===tabHint)-Number(a.id===tabHint));
     container.hidden=false;container.replaceChildren(...tabs.map(tab=>btn((tab.title||"ChatGPT")+(tab.id===tabHint?L(" · 从此标签页打开"," · Opened from this tab"):""),async()=>{
-      const result=await chrome.runtime.sendMessage({kind:"batch-discover",tab:tab.id});if(result?.error)throw Error(result.error);
+      check();const choice=++discovery,result=await chrome.runtime.sendMessage({kind:"batch-discover",tab:tab.id});check();
+      if(choice!==discovery)throw new DOMException("Cancelled","AbortError");
+      if(result?.error)throw Error(result.error);
       if(!result?.rows)throw Error("source-changed");await accept({...result,kind:"web",tab:tab.id});container.hidden=true;
     })));
     if(!container.children.length)container.textContent=L("先打开已登录的 ChatGPT 私人页面，再重试。","Open a signed-in private ChatGPT page, then retry.");
   }
   $("web-source").onclick=()=>work(()=>chooseWeb($("web-tabs"),async result=>{
-    await clearSource();source=result;catalogue();if(!source.scope)failure(Error("scope-unverified"));
+    ReaderCenterSelection.create({source:result});
+    const previous=sourceDirName;sourceDirName=null;readVersion++;bindingRun++;targetRun++;mappings={};mappingScope="";
+    source=result;catalogue();if(!source.scope)failure(Error("scope-unverified"));
+    if(previous)await (await root).removeEntry(previous,{recursive:true}).catch(()=>{});
   }));
+  $("refresh-source").onclick=()=>work(async()=>{
+    if(refreshing||source?.kind!=="web"||step!==1)return;
+    const before=source,n=++sourceRun;refreshing=true;$("refresh-source").disabled=true;counts();
+    $("refresh-status").textContent=L("正在重新核实已发现目录…","Rechecking discovered directory…");
+    try{
+      const result=await chrome.runtime.sendMessage({kind:"batch-discover",tab:before.tab});
+      if(n!==sourceRun||step!==1||source!==before)throw new DOMException("Cancelled","AbortError");
+      if(result?.error)throw Error(result.error);
+      const next={...result,kind:"web",tab:before.tab};
+      if(!next.scope||next.scope!==before.scope)throw Error("source-changed");
+      const changed=selectionModel.refreshSource(next);source=next;sourceBlocked=false;bindingRun++;targetRun++;
+      const groups=selectionModel.summary().groups;
+      if(!groups.some(g=>g.id===activeGroup))activeGroup="";
+      if(!wide.matches&&activeGroup){$("project-query").value="";projectPage=Math.floor(groups.findIndex(g=>g.id===activeGroup)/ReaderCenterSelection.PAGE_SIZE);}
+      projectList();selection();
+      $("refresh-status").textContent=changed.removedCount?
+        L(`已保留 ${changed.retainedCount} 条勾选；${changed.removedCount} 条因不再发现或归属改变而移出，请核对。`,
+          `${changed.retainedCount} selections retained; ${changed.removedCount} removed because no longer discovered or membership changed. Review before continuing.`):
+        L(`目录已刷新，保留 ${changed.retainedCount} 条勾选；新发现项未自动勾选。`,
+          `Directory refreshed; ${changed.retainedCount} selections retained. New discoveries are not selected automatically.`);
+    }catch(e){
+      if(e.name!=="AbortError"){
+        sourceBlocked=true;$("refresh-status").textContent=L("刷新未完成，原目录及勾选保留；核实来源后再继续。","Refresh incomplete. Original directory and selections retained; verify source before continuing.");
+      }
+      throw e;
+    }finally{
+      if(n===sourceRun){refreshing=false;$("refresh-source").disabled=false;counts();}
+    }
+  });
   $("restore-web").onclick=()=>work(()=>chooseWeb($("resume-web-tabs"),async result=>{
     if(result.scope!==plan.source.scope)throw Error("source-changed");
     await clearSource();source=result;await savePlan({source:{...plan.source,catalog:result.catalog,tab:result.tab}});await renderTasks();
@@ -503,10 +735,12 @@
   chrome.storage.onChanged.addListener((changes,area)=>{
     if(area!=="local")return;
     if(changes.device&&(changes.device.oldValue?.id!==changes.device.newValue?.id||changes.device.oldValue?.user!==changes.device.newValue?.user)){
-      stop=true;ownerChanged=true;if(step===3)work(renderTasks);else if(step===2)work(targets);}
+      sourceRun++;cancelRefresh();projectDrafts.clear();mappingScope="";targetsReady=false;
+      $("target-mappings").replaceChildren();
+      stop=true;ownerChanged=true;if(step===3)work(renderTasks);else if(step===2)work(targets);else if(step===1)counts();}
     if(changes.jobs&&step===3)work(renderTasks);
   });
-  addEventListener("pagehide",()=>{stop=true;readVersion++;clearInterval(pairTimer);clearInterval(taskTimer);
+  addEventListener("pagehide",()=>{stop=true;sourceRun++;readVersion++;clearInterval(pairTimer);clearInterval(taskTimer);
     if(sourceDirName)void root.then(r=>r.removeEntry(sourceDirName,{recursive:true})).catch(()=>{});
   });
   show(0);work(resumeBox);

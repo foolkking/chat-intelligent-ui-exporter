@@ -11,7 +11,7 @@ const root = path.join(__dirname, '../..');
 const out = process.argv[2] || path.join(require('./paths.cjs').output, '_bundle.js');
 const read = f => fs.readFileSync(path.join(root, 'extension', f), 'utf8');
 const manifest = JSON.parse(read('manifest.json'));
-const files = ['fast-text.js', 'dil-render.js', 'fast-content.js', 'html-export.js', 'marked.min.js', 'settings.js', 'ui-kit.js'].map(read);
+const files = ['fast-text.js', 'dil-render.js', 'fast-content.js', 'html-export.js', 'marked.min.js', 'settings.js', 'ui-kit.js', 'source-dom.js'].map(read);
 
 function driver(manifest, files, jszip, sandboxJs) {
   // The installed extension's sandbox page draws the cards; its ID follows the folder it was
@@ -40,7 +40,7 @@ function driver(manifest, files, jszip, sandboxJs) {
   if (!window.JSZip) (0, eval)('(function(define,module,exports){' + jszip + '\n}).call(window)');
   // marked's UMD wrapper too; then the HTML export module.
   if (!window.marked?.Marked) (0, eval)('(function(define,module,exports){' + files[4] + '\n}).call(window)');
-  (0, eval)(files[0]);(0, eval)(files[1]);(0, eval)(files[3]);(0, eval)(files[5]);(0, eval)(files[6]);
+  (0, eval)(files[0]);(0, eval)(files[1]);(0, eval)(files[3]);(0, eval)(files[5]);(0, eval)(files[6]);(0, eval)(files[7]);
   if (window.__liveMainWorld) {
     // Evaluates in the page instead of the installed sandbox (for dil-render changes).
     (0, eval)(sandboxJs);const sb = window.ChatExportDilSandbox;

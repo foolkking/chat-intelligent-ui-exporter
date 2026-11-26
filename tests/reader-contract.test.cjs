@@ -56,7 +56,9 @@ test("private package is origin-bound, has no generic tab/cookie permissions, an
   assert.deepEqual(m.host_permissions,["https://reader.example.test/*","https://chatgpt.com/*"]);assert.equal(m.incognito,"not_allowed");
   assert.ok(!m.permissions.some(x=>["cookies","tabs","debugger","webRequest","scripting","<all_urls>"].includes(x))&&!m.externally_connectable);
   const text=name=>fs.readFileSync(path.join(out,name),"utf8");
-  assert.equal(m.side_panel,undefined);assert.ok(!m.permissions.includes("sidePanel"));
+  // Revised G5 contract: ordinary webpages may explicitly open an extension-
+  // private native surface. They still have no content script or host grant.
+  assert.deepEqual(m.side_panel,{default_path:"center.html"});assert.ok(m.permissions.includes("sidePanel"));
   const pages=["panel.html","host.html","frame.html","center.html"];
   const included=[m.background.service_worker,...m.content_scripts.flatMap(x=>x.js),...pages];
   for(const doc of pages)
@@ -158,7 +160,7 @@ test("without a retained local receipt, source status looks up only the open Cha
   }
 
   const found=await run();
-  assert.deepEqual(found.result,{state:"previous",name:"",canSave:true});
+  assert.deepEqual(found.result,{state:"previous",progressKey:null,name:"",canSave:true});
   assert.deepEqual(found.requests.map(r=>r.path),["capabilities","sources/status"]);
   assert.equal(found.requests[1].deviceId,"device-1");
   assert.deepEqual(JSON.parse(found.requests[1].options.body),{source_id:sourceId});
@@ -173,7 +175,7 @@ test("without a retained local receipt, source status looks up only the open Cha
   assert.deepEqual(switched.result,{error:"changed"});
   assert.deepEqual(switched.requests.map(r=>r.path),["capabilities"]);
   const noDestination=await run({destination:false});
-  assert.deepEqual(noDestination.result,{state:"previous",name:"",canSave:false});
+  assert.deepEqual(noDestination.result,{state:"previous",progressKey:null,name:"",canSave:false});
   for(const consent of [null,"another-device"]){
     const privateByDefault=await run({consent});
     assert.equal(privateByDefault.result.state,"save");assert.deepEqual(privateByDefault.requests,[]);
@@ -207,4 +209,55 @@ test("changing the configured Reader origin forgets only the old device data, wi
   vm.runInContext(fs.readFileSync(path.join(__dirname,"../reader/client.js"),"utf8"),env);
   await env.ReaderClient.trust;assert.equal(restricted,2);assert.deepEqual(local,{unrelated:"keep"});
   assert.deepEqual(session,{});assert.equal(requests,0);
+});
+test("source task display is attempt/account scoped and an extended append ticket depends on Reader capability",async()=>{
+  const vm=require("node:vm"),device={id:"synthetic-device",origin:"https://reader.example.test"},sessions={},opened=[];
+  const local={device,destination:{device:device.id,project:null},jobs:[]};let extended=true,receipt={mode:"selective_append",status:"committed"};
+  const env=vm.createContext({READER_ORIGIN:device.origin,TextEncoder,crypto:require("node:crypto").webcrypto,
+    source:()=>true,currentSource:async()=>true,navigator:{locks:{request:async(_name,fn)=>fn()}},
+    chrome:{runtime:{onConnect:{addListener(){}}},storage:{
+      local:{get:async()=>local},session:{get:async()=>sessions,set:async items=>Object.assign(sessions,items),remove:async key=>{delete sessions[key];}}},
+      tabs:{onActivated:{addListener(){}},create:async details=>opened.push(details)}},
+    ReaderClient:{trust:Promise.resolve(),request:async(_id,path)=>({json:async()=>path==="capabilities"?
+      {protocol:1,import_profile:"reader-chat-v1",capture:true,resumable_capture:true,selective_append:true,selective_append_ranges:extended}:
+      {...receipt,conversation_id:"00000000-0000-4000-8000-000000000099"}})}});
+  for(const file of ["progress.js","source-actions.js"])vm.runInContext(fs.readFileSync(path.join(__dirname,"../reader",file),"utf8"),env);
+  const sender={tab:{id:4},documentId:"synthetic-document"},invoke=async(kind,attempt)=>JSON.parse(JSON.stringify(await env.ReaderSourceAction(
+    {kind,attempt},sender,"/c/synthetic-task",async()=>{})));
+  for(const capability of [true,false]){
+    extended=capability;for(const key of Object.keys(sessions))delete sessions[key];
+    const result=await invoke("start-append");
+    assert.equal(result.extendedSelection,capability);
+    assert.equal(sessions["ticket:"+result.ticket].extendedSelection,capability,"only server capability binds the host ticket");
+  }
+  const sourceKey=await env.sourceKey("synthetic-task");
+  local.jobs=[
+    {key:"append-attempt",device:device.id,sourceKey,mode:"append",phase:"append-ready",stats:{sourceBytes:10}},
+    {key:"save-attempt",device:device.id,sourceKey,mode:"save",phase:"uploading",active:true,stats:{sourceBytes:9000}},
+  ];
+  const current=await invoke("source-state","append-attempt"),again=await invoke("source-state","append-attempt");
+  assert.equal(current.state,"append-ready");assert.equal(current.stats.sourceBytes,10);
+  assert.match(current.progressKey,/^[a-f0-9]{64}$/);assert.equal(current.progressKey,again.progressKey);
+  assert.doesNotMatch(JSON.stringify(current),/append-attempt|synthetic-device/);
+  const saved=await invoke("source-state","save-attempt");assert.notEqual(saved.progressKey,current.progressKey);
+  local.jobs[0].phase="append-complete";local.jobs[0].partial=true;local.jobs[0].appendResult={added:1,skipped:0,partial:true};
+  assert.equal((await invoke("source-state","append-attempt")).state,"append-partial");
+  local.jobs[0].phase="append-ready";local.jobs[0].partial=false;
+  local.jobs[0].iid="00000000-0000-4000-8000-000000000098";
+  receipt={mode:"selective_append",status:"queued",progress:20};
+  const processing=await invoke("source-state","append-attempt");
+  assert.equal(processing.state,"saving");assert.equal(processing.taskPhase,"processing");
+  assert.equal(processing.stats.serverProgress,20);
+  receipt={mode:"selective_append",status:"committed"};
+  assert.equal((await invoke("source-state","append-attempt")).state,"append-processed","a legacy receipt is not evidence of completeness");
+  receipt={...receipt,result:{added:1,skipped:0,partial:false}};
+  assert.equal((await invoke("source-state","append-attempt")).state,"append-complete");
+  receipt={mode:"selective_append",status:"failed",failure:{code:"APPEND_REVIEW_CHANGED",stage:"commit",recovery:"review_in_reader"}};
+  const changed=await invoke("source-state","append-attempt");assert.equal(changed.state,"append-review");
+  assert.equal(changed.diagnostic.recovery,"review_in_reader");
+  assert.equal(local.jobs[0].phase,"append-ready","receipt readback never mutates the private task or retries submission");
+  local.device={...device,id:"other-device"};local.jobs[0].device="other-device";
+  assert.notEqual((await invoke("source-state","append-attempt")).progressKey,current.progressKey);
+  local.device=null;assert.deepEqual(await invoke("source-state"),{state:"connect",progressKey:null});
+  assert.equal(opened.length,0,"reading a task never opens a Reader page or confirms an append");
 });

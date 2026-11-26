@@ -10,7 +10,9 @@ const LOCALE = process.env.EXPORTER_LOCALE || 'zh_CN';
 let current = LOCALE;
 const use = locale => {current = locale;I18n.setLocale(locale);return locale;};
 use(LOCALE);
-const sources = [...I18n.LOCALES.map(l => `extension/locales/${l}.js`), 'extension/i18n.js'].map(f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8'));
+// Match the real content-script dependency order, including the shared source
+// DOM adapter. Its own tests supply visibility/layout rather than faking a page.
+const sources = [...I18n.LOCALES.map(l => `extension/locales/${l}.js`), 'extension/i18n.js', 'extension/source-dom.js'].map(f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8'));
 function load(w, locale = current) {
   Object.defineProperty(w.navigator, 'language', {value:I18n.TAGS[locale], configurable:true});
   for (const source of sources) w.eval(source);

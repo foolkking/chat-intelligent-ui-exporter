@@ -16,8 +16,8 @@ fs.mkdirSync(outRoot, {recursive: true});
 const out = fs.mkdtempSync(path.join(outRoot, "edge-progress-"));
 process.env.TEMP = process.env.TMP = out;
 const executablePath = process.env.EDGE_PATH || "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
-const scripts = Object.fromEntries(["glyphs.js", "progress.js", "page-index.js", "source-control.js"].map(name =>
-  [name, fs.readFileSync(path.join(repo, "reader", name), "utf8")]));
+const scripts = Object.fromEntries(["source-dom.js", "glyphs.js", "progress.js", "progress-view.js", "page-index.js", "source-control.js"].map(name =>
+  [name, fs.readFileSync(path.join(repo, name==="source-dom.js"?"extension":"reader", name), "utf8")]));
 const results = {at: new Date().toISOString(), kind: "real Edge, synthetic source/runtime only", files: {}, scenarios: [], errors: []};
 for (const [name, content] of Object.entries(scripts))
   results.files[name] = crypto.createHash("sha256").update(content).digest("hex");
@@ -57,6 +57,8 @@ async function rootState(page) {
       composer: bounds(document.getElementById("composer")),
       menu: [...root.querySelectorAll(".menu button")].map(b => b.textContent),
       active: root.activeElement?.textContent || "", note: [...root.querySelectorAll('[role="status"]')].map(n => n.textContent),
+      rows: Object.fromEntries([...root.querySelectorAll(".progress-rows>div")].map(n=>[n.dataset.stage,n.querySelector("dd").textContent])),
+      detailsOpen: root.querySelector(".read-progress details").open,
       viewport: {width: innerWidth, height: innerHeight}, bodyWidth: document.body.getBoundingClientRect().width
     };
   });
@@ -128,12 +130,13 @@ async function scenario(browser, origin, spec) {
     await page.waitForFunction(() => !__control.querySelector(".main").disabled);
     await click(page, ".main");
     const steps = [
-      {stage: "source", pages: 2, done: 512 * 1024},
-      {stage: "index", done: 50001},
-      {stage: "messages", done: 50000, total: 50001},
-      {stage: "asset", files: 1, done: 17 * 1024 * 1024},
-      {stage: "package", done: 110 * 1024 * 1024},
-      {stage: "upload", done: 4 * 1024 * 1024, total: 125 * 1024 * 1024}
+      {stage: "source", pages: 2, done: 512 * 1024, sourceBytes:512*1024,sourcePages:1},
+      {stage: "index", done: 50001,sourceBytes:12*1024*1024,sourcePages:8},
+      {stage: "messages", done: 50000, total: 50001,messageCount:50000,textBytes:4*1024*1024},
+      {stage: "asset", files: 1, done: 17 * 1024 * 1024,assetBytes:17*1024*1024,filesStarted:1,filesSucceeded:0,filesDiscovered:3},
+      {stage: "package", done: 110 * 1024 * 1024,packageBytes:110*1024*1024,messageCount:50001,
+        textBytes:4400000,filesStarted:3,filesSucceeded:1,filesFailed:2,filesTotal:3},
+      {stage: "upload", done: 4 * 1024 * 1024, total: 125 * 1024 * 1024,packageBytes:125*1024*1024,uploadBytes:4*1024*1024}
     ];
     for (const [index, step] of steps.entries()) {
       await page.evaluate(value => {__fixture.report.update(value); __fixture.report.flush();}, step);
@@ -147,6 +150,8 @@ async function scenario(browser, origin, spec) {
       assert.equal(state.line.width, before, "progress must not shrink or widen reading text");
       assert.ok(state.host.x >= 0 && state.host.right <= spec.width, "progress stays within viewport");
       assert.ok(state.host.bottom <= state.composer.y, "progress must not cover the input");
+      if(index>=1)assert.match(state.rows.source,/12.0 MiB.*8/,"phase changes preserve previously measured source bytes/pages");
+      if(index>=3)assert.match(state.rows.messages,/5000[01]/,"reading files cannot erase converted message count");
       await screenshot(`${String(index + 1).padStart(2, "0")}-${step.stage}`);
       if (index === 0) {
         const observation = await page.evaluate(async () => {
@@ -191,14 +196,20 @@ async function scenario(browser, origin, spec) {
     });
     await page.waitForFunction(() => /继续上传|Resume upload/.test(__control.querySelector(".main").textContent));
     state = await rootState(page); record.interrupted = state;
-    assert.equal(state.progressHidden, true); assert.equal(state.disabled, false);
+    // G2 explicitly retains completed measurements after a pause, unlike the
+    // earlier strip-only UI. Preserve all old no-success/focus/width assertions
+    // and strengthen this one to check the original totals and stopped activity.
+    assert.equal(state.progressHidden, false); assert.equal(state.disabled, false);
+    assert.match(state.rows.source,/12.0 MiB.*8/);assert.match(state.rows.upload,/4.0 MiB.*125.0 MiB/);
+    assert.equal(state.meterHidden,true);assert.match(state.rows.server,/暂停|Paused/);
     assert.doesNotMatch(state.main, /已存入|Saved to/);
     await screenshot("08-paused");
     await click(page, ".main");
     assert.equal(await page.evaluate(() => __fixture.opened), 1, "paused task opens existing library recovery, not a second capture");
 
     await page.evaluate(() => {
-      __fixture.backend = {state: "saving", step: {stage: "upload", done: 9 * 1024 * 1024, total: 125 * 1024 * 1024}};
+      __fixture.backend = {state: "saving", step: {stage: "upload", done: 9 * 1024 * 1024, total: 125 * 1024 * 1024},
+        stats:{uploadBytes:9*1024*1024},finishedAt:null,diagnostic:null};
       __fixture.watchers.forEach(fn => fn({}));
     });
     await page.waitForFunction(() => !__control.querySelector(".read-progress").hidden);
@@ -207,7 +218,11 @@ async function scenario(browser, origin, spec) {
     await screenshot("09-resumed-from-background");
     await page.evaluate(() => {__fixture.backend = {matchAttempt: true}; __fixture.watchers.forEach(fn => fn({}));});
     await page.waitForFunction(() => /已存入|Saved to/.test(__control.querySelector(".main").textContent));
-    assert.equal((await rootState(page)).progressHidden, true);
+    const completed=await rootState(page);
+    assert.equal(completed.progressHidden, false);
+    assert.match(completed.rows.source,/12.0 MiB.*8/);
+    assert.match(completed.rows.server,/已确认保存|Save confirmed/);
+    assert.equal(completed.meterHidden,true);
     record.receiptAttemptAfterVirtualization = await page.evaluate(() => __fixture.attempts.at(-1));
     assert.equal(record.receiptAttemptAfterVirtualization, "synthetic-attempt", "virtualization preserves this capture's receipt identity");
     await screenshot("10-saved");

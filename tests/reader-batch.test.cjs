@@ -40,6 +40,24 @@ test("official ZIP selected attachment bytes are verified; missing files are exp
   const partial=await missing.build(c.id,folder());assert.equal(partial.partial,true);assert.equal(partial.losses.files,1);
   const text=await missing.build(c.id,folder(),{attachments:false});assert.equal(text.partial,false);
 });
+test("only explicit names for proven archive project IDs are offered; optional names never confer membership",async()=>{
+  const rows=[
+    {...chat("one"),project_id:"a",project_name:"潮汐研究"}, {...chat("two"),project_id:"a",project_title:"潮汐研究"},
+    {...chat("three"),project_id:"b"}, {...chat("four"),project_id:"c",project_name:"First title"},
+    {...chat("five"),gizmo_id:"b",project_title:"Personal GPT"}, {...chat("six"),project_id:"opaque",project_name:"opaque"},
+  ];
+  const catalogue=JSON.stringify(rows),dir=[{id:"b",name:"天体力学"},{project_id:"c",title:"Contradiction"},
+    {id:"a",name:"潮汐研究"},{id:"not-selected",name:"Other"}];
+  const parsed=await ReaderLocalArchive.open(zip({"data/conversations.json":catalogue,
+    "data/projects.json":JSON.stringify(dir),"elsewhere/projects.json":JSON.stringify([{id:"b",name:"Wrong suite"}])}),folder());
+  assert.deepEqual(parsed.groups,{"project:a":"潮汐研究","project:b":"天体力学"});
+  assert.equal(parsed.rows.find(r=>r.id==="five").group,"unknown");
+  const plain=await ReaderLocalArchive.open(new Blob([catalogue]),folder());assert.deepEqual(plain.groups,{"project:a":"潮汐研究","project:c":"First title"});
+  for(const optional of ["{}",'[{"id":"b","name":"partial"},', '[{"id":"b","name":"one","name":"two"}]']){
+    const s=await ReaderLocalArchive.open(zip({"conversations.json":catalogue,"projects.json":optional}),folder());
+    assert.deepEqual(s.groups,plain.groups);assert.equal(s.rows.length,rows.length);
+  }
+});
 test("local archive accepts a message over old 2 MiB and source over 8 MiB without an arbitrary conversation limit",async()=>{
   const body="潮汐星图".repeat(750000),data=chat("large",body);
   const source=await ReaderLocalArchive.open(new Blob([JSON.stringify([data])]),folder());

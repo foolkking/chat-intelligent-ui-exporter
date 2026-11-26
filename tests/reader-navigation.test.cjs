@@ -5,7 +5,8 @@ function page(body=""){
   const dom=new JSDOM(body,{url:"https://chatgpt.com/c/synthetic-navigation",pretendToBeVisual:true,runScripts:"outside-only"});
   const w=dom.window;
   w.Element.prototype.getClientRects=function(){return [{top:0,left:0,bottom:40,right:300,width:300,height:40}];};
-  w.ReaderVisible=m=>({body:m.body});w.FastTextExporter={};w.eval(source("page-index.js"));
+  w.ReaderVisible=m=>({body:m.body});w.FastTextExporter={};
+  w.eval(fs.readFileSync(path.join(__dirname,"../extension/source-dom.js"),"utf8"));w.eval(source("page-index.js"));
   return {w,index:w.ReaderPageIndex,close:()=>w.close()};
 }
 test("literal navigation matches retain Unicode text offsets, all repeated hits and regex punctuation",()=>{

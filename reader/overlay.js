@@ -14,11 +14,12 @@ globalThis.ReaderOverlay = ({read,busy}) => {
     .handle{width:24px;height:54px;position:absolute;right:0;top:0;background:transparent;display:grid;place-items:center}
     .handle:before{content:"";width:7px;height:36px;border-radius:6px 0 0 6px;background:var(--accent);justify-self:end}
     .handle:hover:before,.handle:focus-visible:before{width:12px}.handle:after{content:"";position:absolute;inset:0 -1px 0 -20px}
-    .frame{position:absolute;right:8px;top:0;width:min(328px,calc(100vw - 16px));height:min(508px,var(--reader-room,65dvh));
+    .frame{position:absolute;right:8px;top:0;width:min(360px,calc(100vw - 16px));height:min(680px,var(--reader-room,80dvh));
       display:flex;flex-direction:column;border:1px solid var(--line);border-radius:10px;background:var(--p);color:var(--fg);
       box-shadow:0 3px 16px #1328191c;overflow:hidden}
     header,.modes,nav,.find{display:flex;align-items:center;gap:3px;padding:3px 8px}header{border-bottom:1px solid var(--line)}
-    header .icon{margin-inline-start:auto}.modes{min-width:0;padding:0}.modes button{font-weight:600;white-space:normal;line-height:1.25;padding:4px 7px}.icon{display:grid;place-items:center;min-width:44px}
+    header strong{display:flex;align-items:center;gap:8px;flex:1;font-size:16px}.modes{min-width:0;padding:0 8px;border-bottom:1px solid var(--line);flex-shrink:0}.modes button{font-weight:600;white-space:normal;line-height:1.25;padding:4px 10px}.icon{display:grid;place-items:center;min-width:44px}
+    .frame[data-wide=true]{width:min(820px,calc(100vw - 16px))}.save-slot{width:100%;min-width:0}
     svg{width:17px;height:17px;fill:none}.work{min-height:0;flex:1;display:flex;flex-direction:column}
     nav{border-bottom:1px solid var(--line)}nav .icon{margin-inline-start:auto}.find input{min-width:0;flex:1;padding:7px 9px;background:var(--p);border:1px solid var(--line);border-radius:6px}
     .list{overflow:auto;overscroll-behavior:contain;min-height:0;flex:1;padding:3px 7px;scrollbar-width:thin}
@@ -32,25 +33,35 @@ globalThis.ReaderOverlay = ({read,busy}) => {
     mark{background:var(--sel);color:var(--accent)}.status{font-size:12px;margin:4px 11px;overflow-wrap:anywhere}.status:empty{display:none}
     .feedback{display:flex;align-items:center;flex-shrink:0}.feedback .status{flex:1}.feedback button{font-size:12px;color:var(--accent);padding:4px 8px}
     [aria-busy=true]{color:var(--accent)}.frame header,.frame nav,.frame .find,.tools{flex-shrink:0}
+    .tree-tools{display:flex;justify-content:flex-end;gap:4px;padding:0 8px;flex-shrink:0}
+    .tree-tools button{font-size:12px;color:var(--sub);padding:4px 8px}
     iframe{width:100%;flex:1;min-height:0;border:0;background:var(--p)}.tools{display:flex;justify-content:flex-end;border-top:1px solid var(--line)}
-    .tools button{color:var(--accent);padding-inline:12px}@media(pointer:coarse){button,.icon{min-height:44px;min-width:44px}.handle{min-width:44px}}
+    @media(pointer:coarse){button,.icon{min-height:44px;min-width:44px}.handle{min-width:44px}}
   `;
   let path="",view="",tab="outline",find=false,rows=[],limit=64,start=0,turns=[],partial=true,routeEpoch=0,readCtl,jumpCtl,frame,updateTimer,loadedVersion=0;
+  const surface=globalThis.ReaderSurfaceState,privateFrames=new Map();let wide=false;
   let notice="",readStep=null,compact=false,composing=false,stale=false,changedTimer,manualExpanded=false,revealCurrent=false;
   let loadBody=async id=>ReaderPageIndex.domBody(id),searchCtl,searchTimer,searchResult,searchHits=[],searchStats,searchQuery="",searchStopped=false;
   let previewCtl,previewTimer,previewBox,previewOwner,restoringPreview=false;
   const positions=new Map();
   const expanded=new Set(),frameBox=make("section","frame"),work=make("div","work"),nav=make("nav"),query=make("input"),finder=make("div","find");
   const list=make("div","list"),status=make("p","status");status.setAttribute("role","status");
+  const treeTools=make("div","tree-tools");
+  treeTools.append(button(L("展开全部","Expand all"),()=>render.outline?.setAll(true)),
+    button(L("折叠全部","Collapse all"),()=>render.outline?.setAll(false)));
   const feedback=make("div","feedback"),cancel=button(L("停止","Stop"),()=>cancelWork()),reload=button(L("重新读取","Reload"),()=>{
     if(find&&searchStopped&&!stale)void runSearch();else void loadRows();
   });
   feedback.append(status,cancel,reload);cancel.hidden=reload.hidden=true;
-  const heading=make("header"),modes=make("div","modes"),footer=make("div","tools");
+  const heading=make("header"),modes=make("div","modes"),footer=make("div","tools"),saveSlot=make("div","save-slot");
   const handle=button("",()=>toggle(),"handle");handle.title=L("打开 Chat Reader","Open Chat Reader");handle.setAttribute("aria-label",handle.title);
   const close=icon("close",L("收起","Collapse"),()=>hide(true));
-  const outlineButton=button(L("当前对话","Current chat"),()=>open("outline")),libraryButton=button(L("Reader 资料库","Reader library"),()=>open("library"));
-  modes.append(outlineButton,libraryButton);heading.append(modes,close);
+  const expand=button("↗",()=>{wide=!wide;frameBox.dataset.wide=String(wide);expand.setAttribute("aria-pressed",String(wide));
+    expand.setAttribute("aria-label",wide?L("恢复紧凑宽度","Use compact width"):L("扩大工作区","Expand workspace"));surface?.update({wide});},"icon");
+  expand.setAttribute("aria-label",L("扩大工作区","Expand workspace"));expand.setAttribute("aria-pressed","false");
+  const brand=make("strong","", "Chat Reader");brand.prepend(ReaderGlyph("book"));
+  const outlineButton=button(L("导航","Navigation"),()=>open("outline")),libraryButton=button(L("资料库","Library"),()=>open("library")),importButton=button(L("导入","Import"),()=>open("import"));
+  modes.append(outlineButton,libraryButton,importButton);heading.append(brand,expand,close);
   const tabs=[
     button(L("目录","Outline"),()=>switchList("outline",false)),
     button(L("附件","Files"),()=>switchList("files",false)),
@@ -58,16 +69,18 @@ globalThis.ReaderOverlay = ({read,busy}) => {
   ];nav.append(...tabs);query.type="search";query.placeholder=L("查找当前对话正文…","Find in this conversation…");
   query.setAttribute("aria-label",query.placeholder);query.oninput=()=>{if(!composing)queueSearch();};
   query.oncompositionstart=()=>{composing=true;stopSearch();};query.oncompositionend=()=>{composing=false;queueSearch();};finder.append(query);
-  footer.append(button(L("导入…","Import…"),()=>send("open-center")));
-  work.append(nav,finder,list,feedback);frameBox.append(heading,work,footer);frameBox.hidden=true;
+  footer.append(saveSlot);
+  work.append(nav,finder,treeTools,list,feedback);frameBox.append(heading,modes,work,footer);frameBox.hidden=true;
   frameBox.setAttribute("aria-label",L("Chat Reader 导航","Chat Reader navigation"));frameBox.setAttribute("role","region");
   shadow.append(style,handle,frameBox);
   function send(kind,extra={}){return chrome.runtime.sendMessage({kind,path:location.pathname,...extra});}
-  function hide(focus=false){routeEpoch++;readCtl?.abort();readCtl=null;stopPreview();stopSearch();stopJump();frame?.remove();frame=null;frameBox.hidden=true;handle.hidden=false;
-    handle.setAttribute("aria-expanded","false");if(focus)handle.focus({preventScroll:true});}
+  function hide(focus=false){routeEpoch++;readCtl?.abort();readCtl=null;stopPreview();stopSearch();stopJump();frameBox.hidden=true;
+    surface?.update({open:false,slot:saveSlot});handle.hidden=!!surface?.get().hasControl;
+    handle.setAttribute("aria-expanded","false");if(focus&&!globalThis.ReaderFocusWorkspace?.())handle.focus({preventScroll:true});}
+  surface?.subscribe(s=>{handle.hidden=s.open||s.hasControl;footer.hidden=!s.hasControl;});
   function geometry(state=ReaderPageIndex.layout()){
     const {height,edge,top:offset}=state;compact=state.compact;
-    const top=Math.max(offset+8,Math.min(offset+height*.23,edge-310));
+    const top=Math.max(offset+8,Math.min(offset+height*.08,edge-440));
     host.style.setProperty("--reader-top",top+"px");host.style.setProperty("--reader-room",Math.max(44,edge-top)+"px");
   }
   function listKey(){return find?"find":tab;}
@@ -93,6 +106,11 @@ globalThis.ReaderOverlay = ({read,busy}) => {
     readCtl?.abort();readCtl=null;stopSearch();stopJump();
     notice=L("已停止；保留已读取的目录。","Stopped; the available outline is retained.");paintStatus();
     if(returnFocus)(reload.hidden?close:reload).focus({preventScroll:true});
+  }
+  function pauseForCapture(){
+    readCtl?.abort();readCtl=null;stopPreview();stopSearch();stopJump();
+    notice=L("正在保存；目录保留，完成后可重新读取。","Saving; the outline is retained. Reload it after the save.");
+    paintStatus();
   }
   function stopSearch(){clearTimeout(searchTimer);if(searchCtl)searchStopped=true;searchCtl?.abort();searchCtl=null;}
   function queueSearch(){
@@ -173,12 +191,21 @@ globalThis.ReaderOverlay = ({read,busy}) => {
       },body);if(ctl.signal.aborted)return;
       notice=result.ok?(result.kind==="message-fallback"?L("已定位所属消息；无法确认具体附件。","At the owning message; the exact file could not be verified."):""):
         L("未能确认原文位置。可重试或重新读取目录。","Location unconfirmed. Retry or reload the outline.");
-      if(result.ok&&compact&&result.kind!=="message-fallback")hide(true);else if(result.ok)activeRow();
+      if(result.ok){
+        // Only the verified outcome may select a chapter. An attachment's
+        // explicit message-level fallback never implies chapter precision.
+        activeRow(result.kind==="heading"?target:{id:target.id});
+        if(compact&&result.kind!=="message-fallback")hide(true);
+      }
     }catch{if(!ctl.signal.aborted)notice=L("定位中断，可重试。","Location interrupted. Retry.");}
     finally{owner?.removeAttribute("aria-busy");if(jumpCtl===ctl)jumpCtl=null;paintStatus();}
   }
-  function activeRow(){
+  function activeRow(confirmed){
     if(frameBox.hidden||view!=="outline")return;const id=ReaderPageIndex.visible();
+    if(!find&&tab==="outline"&&render.outline){
+      const row=render.rowMap?.get(id),target=confirmed||(row?ReaderPageIndex.currentSection(row)||{id}:null);
+      render.outline.setActive(target,{reveal:revealCurrent});revealCurrent=false;return;
+    }
     list.querySelectorAll("[data-mid]").forEach(n=>{const active=n.dataset.mid===id;n.classList.toggle("active",active);
       if(active)n.setAttribute("aria-current","location");else n.removeAttribute("aria-current");});
   }
@@ -187,6 +214,7 @@ globalThis.ReaderOverlay = ({read,busy}) => {
   }
   function render(){
     stopPreview();
+    treeTools.hidden=find||tab!=="outline"||!rows.length;
     finder.hidden=!find;tabs[0].setAttribute("aria-pressed",String(!find&&tab==="outline"));tabs[1].setAttribute("aria-pressed",String(!find&&tab==="files"));
     tabs[2].setAttribute("aria-pressed",String(find));const entries=[];
     if(find){
@@ -205,17 +233,18 @@ globalThis.ReaderOverlay = ({read,busy}) => {
       }
       const top=list.scrollTop;list.replaceChildren(...entries);list.scrollTop=top;activeRow();paintStatus();return;
     }
+    if(tab==="outline"){
+      render.outline ||= ReaderOutlineTree({container:list,zh:navigator.language.startsWith("zh"),
+        onLocate:locate,onPreview:previewQuestion,onBeforeRender:stopPreview,
+        onChange:()=>{manualExpanded=true;}});
+      if(render.treeRows!==rows){
+        render.treeRows=rows;render.rowMap=new Map(rows.map(row=>[row.id,row]));render.outline.setRows(rows);
+      }else render.outline.render();
+      activeRow();paintStatus();return;
+    }
     let count=0;const add=el=>{count++;if(count>start&&count<=start+limit)entries.push(el());};
     for(let i=0;i<turns.length;i++){const t=turns[i],seq=L(`第 ${i+1} 轮`,`Turn ${i+1}`);
-      if(!find&&tab==="outline"){
-        add(()=>{const div=make("div","row"), id=(t.q||t.answers[0]).id;
-          const b=item(t.q?.title||L("回答","Answer"),{id},"entry"),toggle=button(expanded.has(id)?"▾":"▸",()=>{
-            manualExpanded=true;if(expanded.has(id))expanded.delete(id);else expanded.add(id);render();list.querySelector(`[data-fold="${i}"]`)?.focus({preventScroll:true});},"fold");
-          toggle.dataset.fold=String(i);toggle.setAttribute("aria-label",L("回答章节","Answer sections")+" · "+seq);toggle.setAttribute("aria-expanded",String(expanded.has(id)));
-          div.append(toggle,b);if(t.q)previewQuestion(t.q,b,div);return div;});
-        if(expanded.has((t.q||t.answers[0]).id))for(const a of t.answers){if(!a.headings.length)add(()=>item(L("回答","Answer"),{id:a.id},"child"));
-          a.headings.forEach((h,k)=>add(()=>{const b=item(h.text,{id:a.id,heading:k},"child");b.style.paddingInlineStart=(11+Math.min(h.level,5)*5)+"px";return b;}));}
-      }else for(const row of [t.q,...t.answers].filter(Boolean)){
+      for(const row of [t.q,...t.answers].filter(Boolean)){
         const role=seq+" · "+(row.role==="user"?L("提问","Question"):L("回答","Answer"));
         row.files.forEach((file,k)=>add(()=>{const b=item(file.name||file,{id:row.id,file:k},"result");
           const type={image:L("图片","Image"),file:L("文件","File"),table:L("表格","Table")}[file.type];
@@ -223,20 +252,17 @@ globalThis.ReaderOverlay = ({read,busy}) => {
       }
     }
     if(start>=count&&start){start=Math.max(0,Math.floor((count-1)/64)*64);render();return;}
-    if(start)entries.unshift(button(tab==="outline"?L("查看更早的轮次","Earlier turns"):L("上一页附件","Previous files"),()=>{start=Math.max(0,start-64);render();list.scrollTop=0;}));
-    if(count>start+limit)entries.push(button(tab==="outline"?L("查看后续轮次","Later turns"):L("下一页附件","Next files"),()=>{
+    if(start)entries.unshift(button(L("上一页附件","Previous files"),()=>{start=Math.max(0,start-64);render();list.scrollTop=0;}));
+    if(count>start+limit)entries.push(button(L("下一页附件","Next files"),()=>{
       start+=limit;render();list.scrollTop=0;
     }));
     list.replaceChildren(...entries);activeRow();
-    if(revealCurrent&&!find&&tab==="outline"){
-      revealCurrent=false;const active=list.querySelector(".active"),box=list.getBoundingClientRect(),r=active?.getBoundingClientRect();
-      if(r)list.scrollTop+=r.top-box.top-Math.min(80,box.height/3);
-    }
-    if(!jumpCtl)notice=!count?L("没有匹配项目。","No matching items."):"";
+    if(!jumpCtl&&!notice&&!count)notice=L("没有匹配项目。","No matching items.");
     paintStatus();
   }
   async function loadRows(){
     if(frameBox.hidden||view!=="outline")return;
+    if(busy()){pauseForCapture();return;}
     readCtl?.abort();stopPreview();stopSearch();stopJump();const ctl=new AbortController();readCtl=ctl;readStep=null;stale=false;
     searchResult=null;searchHits=[];searchQuery="";searchStopped=false;
     rows=ReaderPageIndex.domRows().map(ReaderPageIndex.metadata);loadBody=async id=>ReaderPageIndex.domBody(id);
@@ -252,30 +278,35 @@ globalThis.ReaderOverlay = ({read,busy}) => {
   }
   async function open(want,remember=true){
     if(!ReaderRoutes.eligible(location.pathname))return;
-    const n=++routeEpoch;readCtl?.abort();readCtl=null;stopPreview();stopSearch();stopJump();frame?.remove();frame=null;
-    view=ReaderRoutes.chat(location.pathname)?want:"library";outlineButton.hidden=!ReaderRoutes.chat(location.pathname);
-    if(remember&&ReaderRoutes.chat(location.pathname))void send("surface-tab",{view});
+    const n=++routeEpoch;readCtl?.abort();readCtl=null;stopPreview();stopSearch();stopJump();frame=null;
+    for(const f of privateFrames.values())f.hidden=true;
+    view=want==="import"?"import":ReaderRoutes.chat(location.pathname)?want:"library";outlineButton.hidden=!ReaderRoutes.chat(location.pathname);
+    if(remember)void send("surface-tab",{view});
     frameBox.hidden=false;handle.hidden=true;handle.setAttribute("aria-expanded","true");geometry();close.focus({preventScroll:true});
-    outlineButton.setAttribute("aria-pressed",String(view==="outline"));libraryButton.setAttribute("aria-pressed",String(view==="library"));
-    work.hidden=view!=="outline";footer.hidden=view==="library";
+    outlineButton.setAttribute("aria-pressed",String(view==="outline"));libraryButton.setAttribute("aria-pressed",String(view==="library"));importButton.setAttribute("aria-pressed",String(view==="import"));
+    work.hidden=view!=="outline";surface?.update({open:true,view,wide,slot:saveSlot});
     globalThis.ReaderCloseSaveMenu?.();
-    if(view==="library"){
-      const result=await send("frame-ticket");if(n!==routeEpoch)return;
-      if(!result?.ticket){work.hidden=false;status.textContent=L("资料库未打开，请收起后重试。","Library unavailable. Reopen to retry.");return;}
-      frame=make("iframe");frame.title=L("Reader 资料库","Reader library");frame.referrerPolicy="no-referrer";frame.src=chrome.runtime.getURL("frame.html")+"#"+result.ticket;
-      frameBox.insertBefore(frame,footer);return;
+    if(view!=="outline"){
+      if(privateFrames.has(view)){frame=privateFrames.get(view);frame.hidden=false;return;}
+      const chosenView=view,result=await send("frame-ticket",{view:chosenView});if(n!==routeEpoch)return;
+      if(!result?.ticket){work.hidden=false;status.textContent=L("工作区未打开，请收起后重试。","Workspace unavailable. Reopen to retry.");return;}
+      frame=make("iframe");frame.title=chosenView==="import"?L("Reader 导入","Reader import"):L("Reader 资料库","Reader library");
+      frame.referrerPolicy="no-referrer";frame.src=chrome.runtime.getURL("frame.html")+"#"+result.ticket;frame.dataset.view=chosenView;
+      privateFrames.set(chosenView,frame);frameBox.insertBefore(frame,footer);return;
     }
     if(rows.length&&!stale&&loadedVersion===ReaderPageIndex.sample()){render();if(!partial)return;}
     await loadRows();
   }
-  async function toggle(){if(!frameBox.hidden){hide(true);return;}const r=await send("surface-tab");await open(r?.view==="library"?"library":"outline",false);}
+  async function toggle(){if(!frameBox.hidden){hide(true);return;}const r=await send("surface-tab");await open(["library","import"].includes(r?.view)?r.view:"outline",false);}
   function mount(){
-    const p=location.pathname;if(p!==path){path=p;hide();rows=[];turns=[];loadBody=async id=>ReaderPageIndex.domBody(id);searchResult=null;searchHits=[];searchQuery="";
+    const p=location.pathname;if(p!==path){path=p;hide();for(const f of privateFrames.values())f.remove();privateFrames.clear();frame=null;rows=[];turns=[];loadBody=async id=>ReaderPageIndex.domBody(id);searchResult=null;searchHits=[];searchQuery="";
       expanded.clear();manualExpanded=false;positions.clear();query.value="";find=false;tab="outline";start=0;limit=64;stale=false;
       if(!ReaderRoutes.eligible(p)){host.remove();return;}}
     if(ReaderRoutes.eligible(p)&&!host.isConnected){document.body?.append(host);geometry();}
   }
   globalThis.ReaderOpenLibrary=()=>open("library");globalThis.ReaderCloseOverlay=()=>hide();
+  globalThis.ReaderPauseNavigationForCapture=pauseForCapture;
+  globalThis.ReaderOpenWorkspace=want=>open(["outline","library","import"].includes(want)?want:"outline");
   shadow.addEventListener("keydown",e=>{if(e.key==="Escape"){e.preventDefault();e.stopPropagation();
       if(jumpCtl||readCtl||searchCtl)cancelWork();else if(previewBox)stopPreview(true);else if(find){switchList(tab,false);tabs[2].focus({preventScroll:true});}else hide(true);}});
   const userMove=e=>{if(e.isTrusted&&!e.composedPath().includes(host)&&(!e.key||["PageUp","PageDown","Home","End","ArrowUp","ArrowDown"," "].includes(e.key))&&jumpCtl){
@@ -290,17 +321,19 @@ globalThis.ReaderOverlay = ({read,busy}) => {
     updateTimer=setTimeout(()=>{updateTimer=null;activeRow();},90);},{capture:true,passive:true});
   new MutationObserver(changes=>{
     if(path!==location.pathname||!host.isConnected&&ReaderRoutes.eligible(path))mount();
-    if(frameBox.hidden||view!=="outline"||!changes.some(c=>c.target.closest?.("[data-message-id],[data-current-node-id]")||
-      [...c.addedNodes,...c.removedNodes].some(n=>n.matches?.("[data-message-id],[data-current-node-id]")||n.querySelector?.("[data-message-id]"))))return;
+    if(frameBox.hidden||view!=="outline"||!changes.some(c=>c.target.closest?.("[data-message-id],[data-chatgpt-search-message-ids],[data-current-node-id]")||
+      [...c.addedNodes,...c.removedNodes].some(n=>n.matches?.("[data-message-id],[data-chatgpt-search-message-ids],[data-current-node-id]")||n.querySelector?.("[data-message-id],[data-chatgpt-search-message-ids]"))))return;
     clearTimeout(changedTimer);changedTimer=setTimeout(()=>{
       if(frameBox.hidden||view!=="outline"||loadedVersion===ReaderPageIndex.sample())return;
       readCtl?.abort();readCtl=null;stopPreview();stopSearch();stopJump();stale=partial=true;
       notice=L("对话已变化，请重新读取目录。","The conversation changed. Reload the outline.");paintStatus();
     },160);
-  }).observe(document.documentElement,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:["data-current-node-id","data-talvt-turn-state"]});
+  }).observe(document.documentElement,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:["data-current-node-id","data-talvt-turn-state","data-chatgpt-search-message-ids"]});
   addEventListener("popstate",mount);addEventListener("pageshow",mount);
   chrome.runtime.onMessage.addListener((m,s,reply)=>{if(s.id!==chrome.runtime.id||s.tab)return;
     if(m?.kind==="reader-toggle"){mount();void toggle();reply({ok:true});}
+    if(m?.kind==="reader-open-import"){mount();void open("import");reply({ok:true});}
+    if(m?.kind==="reader-open-library"){mount();void open("library");reply({ok:true});}
     if(m?.kind==="reader-collapse"){hide(true);reply({ok:true});}
     if(m?.kind==="reader-surface-path")reply({current:ReaderRoutes.eligible(location.pathname)&&location.pathname===m.path});
   });mount();

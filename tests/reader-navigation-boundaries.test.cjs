@@ -10,7 +10,8 @@ function page(url="https://chatgpt.com/c/synthetic",html=""){
   w.chrome={runtime:{id:"synthetic-extension",sendMessage:async m=>{messages.push(m);return m.kind==="source-state"?{state:"save"}:m.kind==="surface-tab"?{view:"outline"}:{ok:true};},
     onMessage:{addListener:f=>listeners.push(f)},connect(){connections++;return {onMessage:{addListener(){}},onDisconnect:{addListener(){}},disconnect(){}};}}};
   w.ReaderVisible=m=>({body:m.body});w.FastTextExporter={};
-  for(const n of ["routes.js","glyphs.js","progress.js","page-index.js"])w.eval(script(n));
+  w.eval(fs.readFileSync(path.join(__dirname,"../extension/source-dom.js"),"utf8"));
+  for(const n of ["routes.js","glyphs.js","progress.js","progress-view.js","page-index.js","outline-tree.js"])w.eval(script(n));
   w.ReaderPageIndex.observeLayout=()=>{};w.ReaderPageIndex.layout=()=>({height:900,edge:800,top:0,compact:false});
   return {w,roots,messages,listeners,connections:()=>connections,close:()=>{
     for(const observer of observers)observer.disconnect();w.close();assert.deepEqual(errors,[],"No runtime exceptions may be hidden by a passing assertion.");
@@ -80,17 +81,30 @@ test("project-home visible directory discovery cannot resolve conflicting projec
     assert.equal(data.rows.find(r=>r.id==="visible").group,"project:g-p-alpha");
   }finally{p.close();}
 });
-test("source project entry opens only a tab hint and preserves live-document authorization",async()=>{
-  const id="a".repeat(32),tab={id:7,url:"https://chatgpt.com/g/g-p-alpha/project",active:true},created=[];
+test("a localized project-home slug names bare project chats by stable ID; conflicting or cross-site labels are not suggested",async()=>{
+  const id="g-p-"+"0123456789abcdef".repeat(2);
+  const p=await workspace("https://chatgpt.com/",`<nav><a href="/g/${id}-%E6%B5%B7%E6%B4%8B/project">海洋</a>
+    <a href="/g/${id}/c/chat">A conversation, not a project title</a><a href="https://elsewhere.example/g/${id}/project">False</a></nav>`);
+  try{
+    const r=p.w.ReaderRoutes,data=await p.discover();assert.equal(data.groups["project:"+id],"海洋");
+    assert.equal(data.rows[0].group,"project:"+id);
+    for(const slug of ["%2Fprivate","%23","%00","bad%"])assert.equal(r.projectHome(`/g/${id}-${slug}/project`),"");
+    const a=p.w.document.createElement("a");a.href=`/g/${id}/project`;a.textContent="Another name";p.w.document.querySelector("nav").append(a);
+    assert.equal((await p.discover()).groups["project:"+id],null);
+  }finally{p.close();}
+});
+test("source project entry opens the same workspace without a new tab and preserves live-document authorization",async()=>{
+  const id="a".repeat(32),tab={id:7,url:"https://chatgpt.com/g/g-p-alpha/project",active:true},created=[],sent=[];
   const listeners=[],c=vm.createContext({URL,URLSearchParams,crypto:require("node:crypto").webcrypto,Date,
     ReaderClient:{trust:Promise.resolve()},source:s=>s.id===id&&s.frameId===0&&s.documentId==="original",
     chrome:{runtime:{id,getURL:n=>`chrome-extension://${id}/${n}`,onMessage:{addListener:f=>listeners.push(f)}},
-      tabs:{get:async()=>tab,sendMessage:async(_t,_m,o)=>({current:o.documentId==="original"}),create:async v=>{created.push(v);return v;},onRemoved:{addListener(){}}},
+      tabs:{get:async()=>tab,sendMessage:async(t,m,o)=>{sent.push({t,m,o});return {current:o.documentId==="original",ok:true};},create:async v=>{created.push(v);return v;},onRemoved:{addListener(){}}},
       action:{onClicked:{addListener(){}}}}});
   vm.runInContext(script("routes.js"),c);vm.runInContext(script("surfaces.js"),c);
   const sender={id,frameId:0,documentId:"original",url:tab.url,tab},send=s=>new Promise(r=>listeners[0]({kind:"open-center",path:"/g/g-p-alpha/project"},s,r));
-  assert.equal((await send(sender)).ok,true);assert.equal(created[0].url,`chrome-extension://${id}/center.html?tab=7`);
-  await send({...sender,documentId:"replaced"});assert.equal(created.length,1);
+  assert.equal((await send(sender)).ok,true);assert.equal(created.length,0);
+  assert.deepEqual(JSON.parse(JSON.stringify(sent.at(-1))),{t:7,m:{kind:"reader-open-import"},o:{documentId:"original"}});
+  const allowed=sent.length;await send({...sender,documentId:"replaced"});assert.equal(sent.length,allowed);assert.equal(created.length,0);
 });
 test("attachment navigation mounts a fixed page and reaches every file without accumulating earlier pages",async()=>{
   const p=page();try{

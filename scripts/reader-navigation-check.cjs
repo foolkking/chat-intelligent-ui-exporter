@@ -1,13 +1,13 @@
-// Actual Edge + actual navigation/control modules, synthetic virtual transcript.
+// Actual Chromium-family browser + actual modules, synthetic virtual transcript.
 // This does NOT certify a logged-in ChatGPT DOM/API or Reader account.
 const fs=require("node:fs"),path=require("node:path"),http=require("node:http"),assert=require("node:assert/strict"),crypto=require("node:crypto");
 const repo=path.resolve(__dirname,".."),root=path.resolve(process.argv[2]||"");
 if(!process.argv[2]||!["E:\\chat-reader-temp","C:\\Users\\86182\\Desktop\\wkkk"].some(p=>root.toLowerCase().startsWith(path.resolve(p).toLowerCase()+path.sep)))
   throw Error("Supply an authorized task evidence directory.");
 fs.mkdirSync(root,{recursive:true});const out=fs.mkdtempSync(path.join(root,"edge-navigation-"));process.env.TEMP=process.env.TMP=out;
-const results={at:new Date().toISOString(),kind:"real Edge, synthetic source and runtime; not private ChatGPT E2E",files:{},scenarios:[],failures:[]};
-const names=["glyphs.js","progress.js","routes.js","page-index.js","overlay.js","source-control.js"];
-const scripts=Object.fromEntries(names.map(n=>[n,fs.readFileSync(path.join(repo,"reader",n),"utf8")]));
+const results={at:new Date().toISOString(),kind:"real browser, synthetic source and runtime; not private ChatGPT E2E",files:{},scenarios:[],failures:[]};
+const names=["source-dom.js","glyphs.js","progress.js","progress-view.js","routes.js","surface-state.js","page-index.js","outline-tree.js","overlay.js","source-control.js"];
+const scripts=Object.fromEntries(names.map(n=>[n,fs.readFileSync(path.join(repo,n==="source-dom.js"?"extension":"reader",n),"utf8")]));
 for(const [n,s] of Object.entries(scripts))results.files[n]=crypto.createHash("sha256").update(s).digest("hex");
 const html=`<!doctype html><html><head><meta charset=utf-8><style>
 *{box-sizing:border-box}html,body{margin:0;background:#faf9f6;color:#27332e;font:15px/1.6 system-ui}
@@ -30,7 +30,7 @@ async function snapshot(page){
     return {column:bounds(document.querySelector("#column")),frame:bounds(__nav.querySelector(".frame")),composer:bounds(document.querySelector("form")),
       save:bounds(__save.host),navHidden:__nav.querySelector(".frame").hidden,menuHidden:__save.querySelector(".menu").hidden,
       status:__nav.querySelector(".status").textContent,overflow:document.documentElement.scrollWidth>innerWidth,
-      rows:__nav.querySelectorAll(".list .result").length,active:__nav.activeElement?.className||"",scroll:document.querySelector("#scroll").scrollTop};
+      rows:__nav.querySelectorAll(".list .result").length,active:__nav.activeElement?.className||"",saveActive:__save.activeElement?.className||"",scroll:document.querySelector("#scroll").scrollTop};
   });
 }
 async function scenario(origin,spec){
@@ -94,7 +94,7 @@ async function scenario(origin,spec){
   const before=await snapshot(page);rec.before=before;
   const shot=async name=>{const f=path.join(out,spec.name+"-"+name+".png");await page.screenshot({path:f});rec.shots.push(f);};
   try{
-    await shot("00-collapsed");await click(page,"__nav",".handle");await new Promise(r=>setTimeout(r,80));rec.reading=await snapshot(page);await shot("01-reading");
+    await shot("00-collapsed");await click(page,"__save",".open-workspace");await new Promise(r=>setTimeout(r,80));rec.reading=await snapshot(page);await shot("01-reading");
     assert.match(rec.reading.status,/Reading|读取|核对|Indexing/);
     assert.doesNotMatch(rec.reading.status,/%/,"No total is known; no fabricated percentage is permitted.");
     await page.waitForFunction(()=>__nav.querySelector(".feedback button").hidden);
@@ -141,20 +141,23 @@ async function scenario(origin,spec){
       return {result:r,id:ReaderPageIndex.destination(msg,__rows[0],{file:1}).node.dataset.fileId};
     });assert.equal(rec.file.result.ok,true);assert.equal(rec.file.id,"file-two");
     rec.checks.push("duplicate heading occurrence and same-name attachment use exact identity");
-    await click(page,"__save",".toggle");assert.equal((await snapshot(page)).navHidden,true);
-    await click(page,"__nav",".handle");assert.equal((await snapshot(page)).menuHidden,true);await shot("04-mutual-exclusion");
+    await click(page,"__save",".toggle");assert.equal((await snapshot(page)).navHidden,false);
+    assert.ok(await page.evaluate(()=>__save.host.parentElement===__nav.querySelector(".save-slot")&&!document.body.contains(__save.host)),
+      "The one save control is inside the workspace, not duplicated outside it.");
+    assert.equal((await snapshot(page)).menuHidden,false);
+    await page.keyboard.press("Escape");assert.equal((await snapshot(page)).menuHidden,true);await shot("04-mutual-exclusion");
     await page.evaluate(()=>{document.querySelector("form").style.height="220px";});await new Promise(r=>setTimeout(r,180));
     rec.expandedComposer=await snapshot(page);assert.ok(rec.expandedComposer.frame.bottom<=rec.expandedComposer.composer.y-10);
     assert.ok(rec.expandedComposer.save.bottom<=rec.expandedComposer.composer.y-10);assert.equal(rec.expandedComposer.column.width,before.column.width);
     await shot("05-tall-composer");rec.checks.push("ResizeObserver composer avoidance, both surfaces; zero column-width delta");
-    // Escape stops work/search first, then collapses. It must return focus to the handle.
+    // Escape stops work/search first, then collapses. It returns to the one folded workspace button.
     await page.evaluate(()=>__nav.querySelector("header .icon").focus());await page.keyboard.press("Escape");
     if(!(await snapshot(page)).navHidden)await page.keyboard.press("Escape");
-    const closed=await snapshot(page);assert.equal(closed.navHidden,true);assert.equal(closed.active,"handle");
+    const closed=await snapshot(page);assert.equal(closed.navHidden,true);assert.equal(closed.saveActive,"open-workspace");
     rec.checks.push("keyboard collapse returns focus without moving the transcript");
     // Cancel an actual in-flight read using the visible button. A late response
     // must not overwrite the partial/stopped status or the retained outline.
-    await click(page,"__nav",".handle");
+    await click(page,"__save",".open-workspace");
     await page.evaluate(()=>{__slowRead=true;document.body.dataset.currentNodeId="synthetic-leaf-two";});
     await page.waitForFunction(()=>!__nav.querySelectorAll(".feedback button")[1].hidden);
     await click(page,"__nav",".feedback button",1);
@@ -162,7 +165,7 @@ async function scenario(origin,spec){
     await click(page,"__nav",".feedback button");
     rec.stopped=await snapshot(page);assert.match(rec.stopped.status,/Stopped|已停止/);
     assert.match(rec.stopped.status,/Partial outline|部分目录/);
-    assert.ok(await page.evaluate(()=>__nav.querySelectorAll(".list .row").length>0));
+    assert.ok(await page.evaluate(()=>__nav.querySelectorAll(".list [role=treeitem]").length>0));
     assert.ok(await page.evaluate(()=>__nav.activeElement===__nav.querySelectorAll(".feedback button")[1]));
     await shot("06-read-cancelled");await new Promise(r=>setTimeout(r,650));
     assert.equal((await snapshot(page)).status,rec.stopped.status);
@@ -180,7 +183,15 @@ async function scenario(origin,spec){
     const wheelBefore=await snapshot(page);assert.equal(wheelBefore.rows,1);
     await click(page,"__nav",".list .result");
     await page.waitForFunction(()=>!!__nav.querySelector("[aria-busy=true]"));
-    await page.mouse.move(Math.max(4,spec.width/2-20),95);await page.mouse.wheel({deltaY:-24});
+    // The compact workspace now starts higher than the previous overlay.
+    // Wheel over exposed transcript, not over its header (which must not
+    // cancel a jump just because the user is scrolling the plugin itself).
+    const wheelPoint={x:Math.max(4,spec.width/2-20),y:Math.max(1,Math.min(40,wheelBefore.frame.y/2))};
+    assert.ok(await page.evaluate(({x,y})=>{
+      const hit=document.elementFromPoint(x,y);
+      return !!hit&&document.querySelector("#scroll").contains(hit)&&hit!==__nav.host&&hit!==__save.host;
+    },wheelPoint),"Cancellation gesture must actually land on exposed source content.");
+    await page.mouse.move(wheelPoint.x,wheelPoint.y);await page.mouse.wheel({deltaY:-24});
     await page.waitForFunction(()=>/Jump stopped|已停止定位/.test(__nav.querySelector(".status").textContent));
     const manual=await snapshot(page);await new Promise(r=>setTimeout(r,400));
     assert.equal((await snapshot(page)).scroll,manual.scroll);
@@ -198,7 +209,7 @@ async function scenario(origin,spec){
     await page.waitForFunction(()=>!__nav.querySelector("[aria-busy=true]"));
     const located=await snapshot(page);
     assert.equal(located.navHidden,spec.width<760);
-    if(located.navHidden){assert.equal(located.active,"handle");await click(page,"__nav",".handle");}
+    if(located.navHidden){assert.equal(located.saveActive,"open-workspace");await click(page,"__save",".open-workspace");}
     assert.equal(await page.evaluate(()=>__nav.querySelector("input").value),"Question 238:");
     assert.equal((await snapshot(page)).rows,1);
     rec.checks.push("actual result click + compact collapse + focus return retain search state");

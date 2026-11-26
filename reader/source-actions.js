@@ -18,6 +18,12 @@ function rememberFind(s,device,key){
 const pendingSave=j=>j&&(j.active||j.packageReady||["review","upload-unknown","check","reconnect"].includes(j.phase));
 function sourceDisplay(j,attempt){
   if(!j)return "save";
+  if(j.phase==="cancelled")return "cancelled";
+  if(j.mode==="append"&&j.phase==="append-ready")return "append-ready";
+  if(j.mode==="append"&&j.phase==="append-complete")return !j.appendResult?"append-processed":
+    j.appendResult.partial||j.partial||Object.values(j.losses||{}).some(Number)?"append-partial":"append-complete";
+  if(j.mode==="append"&&j.phase==="append-attention"&&j.diagnostic?.recovery==="review_in_reader")return "append-review";
+  if(j.diagnostic?.recovery==="system_support"&&!j.active)return "system-hold";
   if(j.phase==="done"){
     if(j.partial||j.result?.completeness==="partial"||Object.values(j.losses||{}).some(Number))return "partial";
     if(j.result?.completeness!=="complete"||j.key!==attempt)return "previous";
@@ -37,19 +43,30 @@ async function stillHere(s,path,deviceId){
 async function act(m,s,path,host){
   await ReaderClient.trust;
   const {device,destination,jobs=[],sourceLookupDevice}=await chrome.storage.local.get(["device","destination","jobs","sourceLookupDevice"]);
-  if(!device||device.origin!==READER_ORIGIN){manualFinds.delete(s.tab.id);return {state:"connect"};}
+  if(!device||device.origin!==READER_ORIGIN){manualFinds.delete(s.tab.id);return {state:"connect",progressKey:null};}
   const id=path.split("/").filter(Boolean).at(-1);if(!/^[a-z0-9_-]{1,128}$/i.test(id))return {error:"unavailable"};
   const key=await sourceKey(id),same=jobs.filter(j=>j.device===device.id&&j.sourceKey===key),matches=same.filter(j=>j.mode!=="append");
-  const j=matches.at(-1),dest=destination?.device===device.id?destination:null;
+  let j=m.kind==="source-state"?(same.find(j=>j.key===m.attempt)||same.at(-1)):matches.at(-1);
+  const dest=destination?.device===device.id?destination:null;
   const knownHere=manualFound(s,device.id,key);
   let state=j?sourceDisplay(j,m.attempt):dest?"save":"destination";
   const api=async(p,opts)=>(await ReaderClient.request(device.id,p,opts)).json();
   if(m.kind==="source-state"){
-    if(j?.phase==="done"&&saveUuid(j.iid)){
+    if(j?.mode==="append"&&saveUuid(j.iid)){
+      // Returning from Web confirmation must reflect the real receipt, not
+      // forever retain the inactive "append-ready" upload record. This is
+      // read-only: the source document still cannot confirm or retry an append.
+      const rec=await api("imports/"+j.iid);
+      if(!await stillHere(s,path,device.id))return {error:"changed"};
+      const observed=ReaderProgress.appendReceipt(rec);if(!observed)return {error:"unavailable"};
+      j={...j,...observed};
+      if(observed.active)j.stats=ReaderProgress.accumulate(j.stats,{serverProgress:observed.percent});
+      state=sourceDisplay(j,m.attempt);
+    }else if(j?.phase==="done"&&saveUuid(j.iid)){
       // This is a known *Reader receipt*, not a disclosure of passive browsing history.
       const rec=await api("imports/"+j.iid);
       if(!await stillHere(s,path,device.id))return {error:"changed"};
-      if(rec.status!=="committed"||!saveUuid(rec.conversation_id))return {state:"save"};
+      if(rec.status!=="committed"||!saveUuid(rec.conversation_id))return {state:"save",progressKey:null};
     }else if(!j&&sourceLookupDevice===device.id){
       // Visiting a source is not consent to report its ID. Unknown local
       // receipts are checked automatically only on an explicitly opted-in device.
@@ -66,8 +83,18 @@ async function act(m,s,path,host){
       if(!await stillHere(s,path,device.id))return {error:"changed"};
       state="previous";
     }
-    return {state,name:dest?.showName?String(dest.name||"").slice(0,120):"",canSave:!!dest,
-      ...(j?.active&&["reading","uploading"].includes(j.phase)?{step:ReaderProgress.snapshot(j.step)}:{})};
+    // A display-only fingerprint separates tasks/accounts without disclosing
+    // receipt IDs, device IDs or an actionable transfer key to the source page.
+    const progressKey=j?await sourceKey("display\0"+device.id+"\0"+j.key):null;
+    if(!await stillHere(s,path,device.id))return {error:"changed"};
+    return {state,progressKey,name:dest?.showName?String(dest.name||"").slice(0,120):"",canSave:!!dest,
+      ...(j?{step:ReaderProgress.snapshot(j.step),stats:ReaderProgress.accumulate(null,j.stats),
+        taskPhase:["reading","uploading","received","processing","queued","resource-wait","review","done",
+          "cancelled","attention","capture-interrupted","upload-paused","upload-unknown","reconnect","check",
+          "append-ready","append-complete","append-attention"].includes(j.phase)?j.phase:null,
+        diagnostic:ReaderProgress.diagnostic(j.diagnostic),
+        startedAt:Number.isSafeInteger(j.startedAt)?j.startedAt:null,
+        finishedAt:Number.isSafeInteger(j.finishedAt)?j.finishedAt:null}: {})};
   }
   if(m.kind==="open-saved"||m.kind==="find-saved"){
     let cid;
@@ -87,7 +114,8 @@ async function act(m,s,path,host){
     return {state:"previous"};
   }
   if(m.kind==="open-append"){
-    const job=same.find(x=>x.mode==="append"&&x.key===m.attempt&&saveUuid(x.iid));
+    const appends=same.filter(x=>x.mode==="append"&&saveUuid(x.iid));
+    const job=m.attempt?appends.find(x=>x.key===m.attempt):appends.at(-1);
     if(!job||!await stillHere(s,path,device.id))return {error:"changed"};
     const s1=await api("imports/"+job.iid);
     if(s1.mode!=="selective_append"||!await stillHere(s,path,device.id))return {error:"changed"};
@@ -115,8 +143,9 @@ async function act(m,s,path,host){
     await host();if(!await stillHere(s,path,device.id))return {error:"changed"};
     const ticket=crypto.randomUUID(),attempt=crypto.randomUUID();
     await chrome.storage.session.set({["ticket:"+ticket]:{tab:s.tab.id,doc:s.documentId,path,device:device.id,
-      project:excerpt?null:dest.project||null,mode:excerpt?"append":"save",sourceKey:key,attempt,expires:Date.now()+30000}});
-    return {ticket,attempt,textOnly:!excerpt&&!!dest.textOnly};
+      project:excerpt?null:dest.project||null,mode:excerpt?"append":"save",sourceKey:key,attempt,expires:Date.now()+30000,
+      extendedSelection:excerpt&&c.selective_append_ranges===true}});
+    return {ticket,attempt,textOnly:!excerpt&&!!dest.textOnly,...(excerpt?{extendedSelection:c.selective_append_ranges===true}:{})};
   });
 }
 globalThis.ReaderSourceAction=act;

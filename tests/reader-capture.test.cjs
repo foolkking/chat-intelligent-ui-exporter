@@ -60,6 +60,9 @@ async function fixture({brokenFile=false,textOnly=false}={}){
     document:{querySelector:()=>null,documentElement:{}},MutationObserver:class{observe(){}disconnect(){}},
     addEventListener(){},removeEventListener(){},fetch:response,
     ReaderPageIndex:{leaf:()=>undefined,sample:()=>1,mounted:()=>["m0","m2"].map(id=>({dataset:{messageId:id}}))},
+    // This test isolates transport. Actual DOM identity/visibility is covered
+    // separately by reader-source-dom and reader-navigation-source.
+    ChatExportSourceDOM:{generating:()=>false,verify:data=>["m0","m2"].every(id=>data.ids.has(id)),remember(){}},
     ReaderOverlay(){},ReaderSourceControl(opts){control=opts;},
     chrome:{runtime:{sendMessage:async()=>({ticket:"ticket",attempt:"attempt",textOnly}),connect:port}}
   });

@@ -1,17 +1,20 @@
 // Transient reading model. No extension storage, network requests, or writes to the transcript.
 globalThis.ReaderPageIndex = (() => {
-  const selector="[data-message-id]", idOf=el=>el?.dataset.messageId;
-  const mounted=()=>[...document.querySelectorAll(selector)].filter(el=>
-    ["user","assistant"].includes(el.dataset.messageAuthorRole)&&!el.closest('[hidden],[aria-hidden="true"]')&&el.getClientRects().length);
-  const surface=el=>el.querySelector(".markdown,[data-message-content],.whitespace-pre-wrap")||el;
+  const source=globalThis.ChatExportSourceDOM, idOf=source.idOf;
+  const mounted=source.mounted, surface=source.surface;
   const tidy=s=>(s||"").replace(/\s+/g," ").trim();
-  const titles=el=>[...surface(el).querySelectorAll("h1,h2,h3,h4,h5,h6")];
+  const headingLevel=el=>/^H[1-6]$/.test(el.tagName)?Number(el.tagName[1]):
+    el.getAttribute("role")==="heading"&&/^[1-6]$/.test(el.getAttribute("aria-level")||"")?Number(el.getAttribute("aria-level")):0;
+  // Explicit heading semantics are structural evidence; ordinary bold text and
+  // screen-reader conversation-role labels are not answer chapters.
+  const titles=el=>[...surface(el).querySelectorAll("h1,h2,h3,h4,h5,h6,[role=heading][aria-level]")]
+    .filter(n=>headingLevel(n)&&!n.matches("[data-conversation-role]")&&!n.closest(".sr-only,pre,code")&&source.visible(n));
   const fileName=el=>tidy(el.getAttribute("data-file-name")||el.getAttribute("download")||el.getAttribute("alt")||el.textContent);
   function fileNodes(el){
     const result=new Set();
     for(const n of el.querySelectorAll("a[download],a[href*='/files/'],a[href^='sandbox:'],[data-file-name],img[alt]")){
       const owner=n.closest("a[download],a[href*='/files/'],a[href^='sandbox:'],[data-file-name]")||n;
-      if(fileName(owner)&&owner.getClientRects().length)result.add(owner);
+      if(fileName(owner)&&source.visible(owner)&&owner.getClientRects().length)result.add(owner);
     }
     return [...result];
   }
@@ -23,8 +26,8 @@ globalThis.ReaderPageIndex = (() => {
       const occurrence=seen.get(key)||0;seen.set(key,occurrence+1);return {...row,occurrence};});
   }
   function domRows(){
-    return mounted().map(el=>({id:idOf(el),role:el.dataset.messageAuthorRole,body:textMap(surface(el)).text,
-      headings:titles(el).map(h=>({text:tidy(h.textContent),level:Number(h.tagName[1])})),
+    return mounted().map(el=>({id:idOf(el),role:source.roleOf(el),body:textMap(surface(el)).text,
+      headings:titles(el).map(h=>({text:tidy(h.textContent),level:headingLevel(h)})),
       files:files(fileNodes(el).map(n=>({name:fileName(n),id:fileID(n),type:n.tagName==="IMG"?"image":"file"})))}));
   }
   function headings(body){
@@ -33,10 +36,13 @@ globalThis.ReaderPageIndex = (() => {
     for(let i=0;i<lines.length;i++){const line=lines[i];
       const f=/^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
       if(f){if(!fence)fence=f[1];else if(f[1][0]===fence[0]&&f[1].length>=fence.length&&!f[2].trim())fence=null;continue;}
-      const h=!fence&&/^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
+      const h=!fence&&/^ {0,3}(#{1,6})[ \t]+(.+?)\s*$/.exec(line);
       const setext=!fence&&!h&&line.trim()&&/^ {0,3}(=+|-+)\s*$/.exec(lines[i+1]||"");
-      if(h||setext){const value=h?h[2]:line;
-        result.push({level:h?h[1].length:setext[1][0]==="="?1:2,text:tidy(value.replace(/\[([^\]]+)\]\([^)]*\)/g,"$1").replace(/[*_`]/g,""))});
+      if(h||setext){const value=h?h[2].replace(/[ \t]+#+[ \t]*$/,""):line;
+        const text=tidy(value.replace(/\[([^\]]+)\]\([^)]*\)/g,"$1")
+          .replace(/(`+)(.+?)\1|(\*{1,3})(\S(?:.*?\S)?)\3|(?<![\p{L}\p{N}_])(_{1,3})(\S(?:.*?\S)?)\5(?![\p{L}\p{N}_])/gu,
+            (_all,_ticks,code,_stars,emphasis,_underscores,word)=>code??emphasis??word));
+        result.push({level:h?h[1].length:setext[1][0]==="="?1:2,text});
         if(setext)i++;
       }
     }return result;
@@ -44,6 +50,13 @@ globalThis.ReaderPageIndex = (() => {
   function fromBranch(data){
     return data.messages.map(m=>{
       const body=ReaderVisible(m,FastTextExporter).body||"";
+      // An explicit source read can corroborate a changed remount. Only exact
+      // visible text clears uncertainty; Markdown/render differences wait.
+      const el=live.get(m.id);
+      if(el?.isConnected&&uncertain.has(el)&&!source.pending(el)&&source.roleOf(el)===m.role){
+        const text=tidy(textMap(surface(el)).text);
+        if(text&&text===tidy(body)){contents.set(m.id,fingerprint(text));uncertain.delete(el);}
+      }
       return {id:m.id,role:m.role,body,headings:headings(body),files:files([
         ...(m.images||[]).map(a=>({...a,type:"image"})),...(m.attachments||[]).map(a=>({...a,type:"file"})),
         ...(m.tables||[]).map(a=>({...a,type:"table"}))
@@ -53,12 +66,34 @@ globalThis.ReaderPageIndex = (() => {
   // Small slices must own their bytes: a sliced preview can otherwise keep a
   // multi-megabyte V8 backing string alive after its message has been released.
   const copy=s=>Array.from(s||"").join("");
-  const metadata=row=>({id:copy(row.id),role:row.role,title:copy((row.title??tidy(row.body)).slice(0,220)),
-    headings:(row.headings||[]).map(h=>({level:h.level,text:copy(h.text)})),
-    files:(row.files||[]).map(f=>typeof f==="string"?copy(f):{name:copy(f.name),id:copy(f.id),type:f.type,occurrence:f.occurrence})});
+  function sections(row){
+    const stack=[],seen=new Map();
+    return (row.headings||[]).map((h,index)=>{
+      while(stack.length&&stack.at(-1).level>=h.level)stack.pop();
+      const key=JSON.stringify([h.level,h.text]),occurrence=seen.get(key)||0;seen.set(key,occurrence+1);
+      const section={index,level:h.level,text:h.text,parent:stack.at(-1)?.index??null,occurrence,target:{id:row.id,heading:index}};
+      stack.push(section);return section;
+    });
+  }
+  function metadata(row){
+    const entry={id:copy(row.id),role:row.role,title:copy((row.title??tidy(row.body)).slice(0,220)),
+      headings:(row.headings||[]).map(h=>({level:h.level,text:copy(h.text)})),
+      files:(row.files||[]).map(f=>typeof f==="string"?copy(f):{name:copy(f.name),id:copy(f.id),type:f.type,occurrence:f.occurrence})};
+    entry.sections=sections(entry);return entry;
+  }
+  function tree(rows){
+    const turns=[];
+    for(const row of rows){
+      const entry=metadata(row);
+      if(row.role==="user"||!turns.length)turns.push({q:row.role==="user"?entry:null,answers:[]});
+      if(row.role!=="user")turns.at(-1).answers.push(entry);
+    }
+    return turns;
+  }
   function domBody(id){
-    const el=mounted().find(n=>idOf(n)===id);if(!el)throw Error("The message is not mounted.");
-    return textMap(surface(el)).text;
+    const matches=mounted().filter(n=>idOf(n)===id);
+    if(matches.length!==1||source.pending(matches[0])||uncertain.has(matches[0]))throw Error("The message is not uniquely mounted and ready.");
+    return textMap(surface(matches[0])).text;
   }
   // Body bytes stay in the source provider. The navigation model retains only
   // lightweight metadata, a sparse cursor per 64 hits, and one page of snippets.
@@ -93,34 +128,42 @@ globalThis.ReaderPageIndex = (() => {
     }
     onProgress({scanned:rows.length,rows:rows.length,matches:total});return {hits,total,cursors,page};
   }
-  const leaf=()=>document.querySelector("[data-current-node-id]")?.getAttribute("data-current-node-id")||undefined;
-  let revision=0,route="",slots=new Map(),contents=new Map(),marker;
-  const generating=()=>!!document.querySelector('[data-testid="stop-button"],[data-talvt-turn-state="in_progress"]');
+  const leaf=source.branchHint;
+  const contents=new Map(),uncertain=new WeakSet();
+  let revision=0,route="",live=new Map(),marker,unmatched="";
+  const generating=source.generating;
   let wasGenerating=false;
   function fingerprint(text){
     let hash=2166136261;for(let i=0;i<text.length;i++)hash=Math.imul(hash^text.charCodeAt(i),16777619);
     return `${text.length}:${hash}`;
   }
-  function sample(){
-    if(location.pathname!==route){slots.clear();contents.clear();marker=undefined;revision++;route=location.pathname;}
-    const current=leaf();if(current&&marker&&current!==marker)revision++;if(current)marker=current;
+  function sample(messages=mounted()){
+    if(location.pathname!==route){contents.clear();live.clear();marker=undefined;unmatched="";revision++;route=location.pathname;}
+    const current=source.explicitLeaf();if(current&&marker&&current!==marker)revision++;if(current)marker=current;
     const active=generating();if(active&&!wasGenerating)revision++;wasGenerating=active;
-    const messages=mounted(),positions=new Map();
-    for(const el of messages){
-      const id=idOf(el),turn=el.closest("[data-testid^='conversation-turn-']")?.dataset.testid;
-      const key=turn&&turn+"/"+el.dataset.messageAuthorRole;
-      if(key){const ids=positions.get(key)||[];ids.push(id);positions.set(key,ids);}
-      const text=tidy(surface(el).textContent);
-      if(text){const signature=fingerprint(text);
-        if(contents.has(id)&&contents.get(id)!==signature)revision++;contents.set(id,signature);}
+    const unknown=source.outsideBranch();if(unknown&&unknown!==unmatched)revision++;unmatched=unknown;
+    const next=new Map(),duplicates=new Set();
+    for(const el of messages){const id=idOf(el);if(next.has(id))duplicates.add(id);next.set(id,el);}
+    for(const [id,el] of next){
+      // Explicit render-in-progress is not evidence of a source edit. Retain
+      // the last settled signature and compare again when hydration finishes.
+      if(duplicates.has(id)||source.pending(el)){
+        if(contents.has(id)&&live.get(id)!==el)uncertain.add(el);
+        continue;
+      }
+      const text=tidy(textMap(surface(el)).text),prior=contents.get(id);
+      if(!text){if(prior)uncertain.add(el);continue;}
+      const signature=fingerprint(text);
+      if(prior&&prior!==signature){
+        // React can replace a settled message with a partly hydrated copy.
+        // The identity alone cannot prove either a branch edit or a landing.
+        if(live.get(id)!==el||uncertain.has(el)){uncertain.add(el);continue;}
+        revision++;
+      }
+      contents.set(id,signature);uncertain.delete(el);
     }
-    for(const [key,ids] of positions){
-      if(ids.length!==1)continue;
-      if(slots.has(key)&&slots.get(key)!==ids[0])revision++;
-      slots.set(key,ids[0]);
-    }
-    if(contents.size>6000)contents.delete(contents.keys().next().value);
-    if(slots.size>6000)slots.delete(slots.keys().next().value);
+    live=next;
+    while(contents.size>6000)contents.delete(contents.keys().next().value);
     return revision;
   }
   function scroller(el){
@@ -129,10 +172,16 @@ globalThis.ReaderPageIndex = (() => {
     return document.scrollingElement;
   }
   function range(root){
-    const r=root===document.scrollingElement?{top:0,bottom:innerHeight}:root.getBoundingClientRect();
-    const composer=document.querySelector("#prompt-textarea,[data-testid='composer-text-input']");
+    const viewport=globalThis.visualViewport,top=viewport?.offsetTop||0,left=viewport?.offsetLeft||0;
+    const view={top,bottom:top+(viewport?.height||innerHeight),left,right:left+(viewport?.width||innerWidth)};
+    for(let n=root;n&&n!==document.scrollingElement;n=n.parentElement){
+      const style=getComputedStyle(n),r=n.getBoundingClientRect();
+      if(n===root||/auto|scroll|hidden|clip/.test(style.overflowY)){view.top=Math.max(view.top,r.top);view.bottom=Math.min(view.bottom,r.bottom);}
+      if(n===root||/auto|scroll|hidden|clip/.test(style.overflowX)){view.left=Math.max(view.left,r.left);view.right=Math.min(view.right,r.right);}
+    }
+    const composer=source.composer();
     const bottom=composer?.getBoundingClientRect().top;
-    return {top:Math.max(0,r.top)+12,bottom:Math.min(innerHeight,r.bottom,bottom>80?bottom:innerHeight)-12};
+    return {...view,top:view.top+12,bottom:Math.min(view.bottom,bottom>view.top+80?bottom:view.bottom)-12};
   }
   // Keep the literal UTF-16 offsets returned by RegExp; lowercasing a string can
   // change its length (e.g. dotted I), which would select the wrong DOM bytes.
@@ -147,7 +196,7 @@ globalThis.ReaderPageIndex = (() => {
     for(let n=walker.nextNode();n;n=walker.nextNode()){
       const el=n.parentElement;
       if(!el||el.closest('script,style,button,textarea,[hidden],[aria-hidden="true"],.katex-mathml')||
-        getComputedStyle(el).visibility==="hidden"||!el.getClientRects().length)continue;
+        !source.visible(el)||!el.getClientRects().length)continue;
       const next=el.closest("p,li,pre,td,th,h1,h2,h3,h4,h5,h6,blockquote,div")||root;
       if(block&&block!==next){parts.push("\n");at++;}block=next;
       segments.push({node:n,start:at,end:at+n.data.length});parts.push(n.data);at+=n.data.length;
@@ -156,16 +205,20 @@ globalThis.ReaderPageIndex = (() => {
   }
   const context=s=>tidy(s.replace(/!\[([^\]]*)\]\([^)]*\)/g,"$1").replace(/\[([^\]]+)\]\([^)]*\)/g,"$1").replace(/[*_`#]/g,"")).toLowerCase();
   function textTarget(msg,row,target){
+    if(typeof row.body!=="string")return null;
     const model=textMap(surface(msg)),hits=[...matches(model.text,target.query)],source=[...matches(row.body,target.query)];
     const expected=source[target.occurrence];if(!expected)return null;
-    const before=context(row.body.slice(Math.max(0,expected.start-48),expected.start)).slice(-24);
-    const after=context(row.body.slice(expected.end,expected.end+48)).slice(0,24);
-    const compatible=h=>{
+    const compatible=(h,origin)=>{
+      const before=context(row.body.slice(Math.max(0,origin.start-48),origin.start)).slice(-24);
+      const after=context(row.body.slice(origin.end,origin.end+48)).slice(0,24);
       const left=context(model.text.slice(Math.max(0,h.start-64),h.start)),right=context(model.text.slice(h.end,h.end+64));
       return (!before||left.endsWith(before))&&(!after||right.startsWith(after));
     };
-    let hit=hits.length===source.length&&compatible(hits[target.occurrence])?hits[target.occurrence]:null;
-    if(!hit){const candidates=hits.filter(compatible);if(candidates.length===1)hit=candidates[0];}
+    let hit=hits.length===source.length&&compatible(hits[target.occurrence],expected)?hits[target.occurrence]:null;
+    if(!hit){
+      const candidates=hits.filter(h=>compatible(h,expected));
+      if(candidates.length===1&&!source.some(origin=>origin!==expected&&compatible(candidates[0],origin)))hit=candidates[0];
+    }
     if(!hit)return null;
     const first=model.segments.find(s=>s.start<=hit.start&&s.end>hit.start);
     const last=model.segments.find(s=>s.start<hit.end&&s.end>=hit.end);
@@ -182,7 +235,11 @@ globalThis.ReaderPageIndex = (() => {
     if(target.heading!==undefined){
       const h=row.headings[target.heading];if(!h)return null;
       const same=row.headings.slice(0,target.heading).filter(a=>a.text===h.text&&a.level===h.level).length;
-      node=titles(msg).filter(el=>tidy(el.textContent)===h.text&&Number(el.tagName[1])===h.level)[same];
+      const candidates=titles(msg).filter(el=>tidy(el.textContent)===h.text&&headingLevel(el)===h.level);
+      // If only one of two equal headings is currently mounted, its ordinal
+      // is unknown. Wait for proof rather than choosing an unrelated heading.
+      if(candidates.length!==row.headings.filter(a=>a.text===h.text&&a.level===h.level).length)return null;
+      node=candidates[same];
       kind="heading";if(!node)return null;
     }
     if(target.file!==undefined){
@@ -192,80 +249,164 @@ globalThis.ReaderPageIndex = (() => {
       const named=candidates.filter(n=>fileName(n)===known.name);
       // A duplicate name is not proof of which file this is. Never pick the
       // first one by accident; a safe message-level fallback is labelled by UI.
-      node=exact.length===1?exact[0]:named.length===1&&row.files.filter(f=>(f.name||f)===known.name).length===1?named[0]:msg;
+      const uniqueName=named.length===1&&(!known.id||!fileID(named[0]))&&row.files.filter(f=>(f.name||f)===known.name).length===1;
+      node=exact.length===1?exact[0]:uniqueName?named[0]:msg;
       kind=node===msg?"message-fallback":"file";
     }
     return {node,kind,rect:()=>node.getBoundingClientRect()};
   }
-  const pause=()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
-  async function jump(rows,target,signal,report=()=>{},targetBody){
-    const index=rows.findIndex(r=>r.id===target.id),path=location.pathname,version=sample(),order=new Map(rows.map((r,i)=>[r.id,i]));
-    const fail=reason=>({ok:false,reason});
-    if(index<0)return fail("missing");
-    const known=mounted()[0];if(!known)return fail("unmounted");
-    const root=scroller(known), until=performance.now()+12000;
-    let previous=-1,stalls=0,probes=0,low=0,high=Infinity;
-    while(performance.now()<until){
-      signal.throwIfAborted();
-      if(path!==location.pathname||sample()!==version)return fail("changed");
-      const els=mounted(),msg=els.find(el=>idOf(el)===target.id);
-      const view=range(root);
-      if(msg){
-        let stable=0,rectBefore;const settle=performance.now()+900;
-        while(performance.now()<settle){
-          signal.throwIfAborted();if(path!==location.pathname||sample()!==version)return fail("changed");
-          const current=mounted().find(el=>idOf(el)===target.id);if(!current)break;
-          const row=targetBody===undefined?rows[index]:{...rows[index],body:targetBody};
-          const dest=destination(current,row,target);if(!dest)return fail("target");
-          const v=range(root),r=dest.rect();if(!r||!r.width||!r.height)return fail("hidden");
-          const delta=r.top-v.top,max=Math.max(0,root.scrollHeight-root.clientHeight);
-          const next=Math.max(0,Math.min(max,root.scrollTop+delta));
-          // The first/last real target can be visible without enough scroll
-          // range for the reading inset. Verify it at the attainable boundary;
-          // do not keep requesting a negative offset until the jump stalls.
-          if(Math.abs(next-root.scrollTop)>1){
-            root.scrollTo({top:next,behavior:"instant"});stable=0;
-          }else if(rectBefore!==undefined&&Math.abs(r.top-rectBefore)<=1)stable++;else stable=0;
-          rectBefore=r.top;await pause();
-          const verified=dest.rect();
-          if(stable>=3&&dest.node.isConnected&&idOf(dest.node.closest(selector))===target.id&&verified.bottom>v.top&&verified.top<v.bottom){
-            signal.throwIfAborted();return {ok:true,kind:dest.kind,probes};
-          }
-        }
-      }else{
-        const top=root===document.scrollingElement?0:root.getBoundingClientRect().top;
-        const anchors=els.map(el=>({index:order.get(idOf(el)),r:el.getBoundingClientRect()}))
-          .filter(a=>a.index!==undefined&&a.r.height>0).sort((a,b)=>a.index-b.index);
-        if(!anchors.length)return fail("unmounted");
-        const visible=anchors.filter(a=>a.r.bottom>view.top&&a.r.top<view.bottom);
-        // React may still be displaying the old window after a jump. Do not
-        // derive new bounds from stale, entirely offscreen DOM.
-        if(!visible.length){await pause();continue;}
-        const max=Math.max(0,root.scrollHeight-root.clientHeight),first=anchors[0],last=anchors.at(-1);
-        for(const a of anchors){
-          const y=root.scrollTop+a.r.top-top;
-          if(a.index<index)low=Math.max(low,Math.min(max,y+a.r.height));
-          if(a.index>index)high=Math.min(high,Math.max(0,y));
-        }
-        const average=last.index>first.index?Math.abs(last.r.top-first.r.top)/(last.index-first.index):Math.max(80,first.r.height);
-        let y=root.scrollTop+first.r.top-top+(index-first.index)*average;
-        if(Number.isFinite(high)&&low<high)y=Math.max(low,Math.min(high,y));
-        y=Math.max(0,Math.min(max,y));
-        if(Math.abs(y-root.scrollTop)<2&&low<Math.min(high,max))y=(low+Math.min(high,max))/2;
-        report({probes:++probes});root.scrollTo({top:y,behavior:"instant"});await pause();
+  function inside(r,view){
+    return r?.width>0&&r.height>0&&view.bottom>view.top&&view.right>view.left&&
+      r.bottom>view.top&&r.top<view.bottom&&r.right>view.left&&r.left<view.right;
+  }
+  // Geometric top-to-bottom positions are monotone in both CSS layouts.
+  // Only the browser's origin changes: a reverse flex scrollport is 0 at
+  // its bottom, with negative scrollTop toward earlier content.
+  function axis(root){
+    const extent=Math.max(0,root.scrollHeight-root.clientHeight),s=getComputedStyle(root);
+    const reversed=root!==document.scrollingElement&&["flex","inline-flex"].includes(s.display)&&s.flexDirection==="column-reverse";
+    return {start:reversed?-extent:0,extent};
+  }
+  function aligned(root,top,view,{start,extent}=axis(root)){
+    return Math.max(start,Math.min(start+extent,root.scrollTop+top-view.top));
+  }
+  function outerAdjustment(root){
+    const chain=[root];
+    for(let n=root;n&&n!==document.scrollingElement;){
+      n=scroller(n);if(n)chain.push(n);
+    }
+    // Expose the outermost clipped scrollport first. All coordinates and the
+    // entire root chain are observed anew after each individual write.
+    for(let i=chain.length-1;i>0;i--){
+      const parent=chain[i],child=chain[i-1],view=range(parent),rect=child.getBoundingClientRect();
+      if(rect.height>0&&!inside(rect,view)){
+        const top=aligned(parent,rect.top,view);
+        if(Math.abs(top-parent.scrollTop)>1)return {root:parent,top};
       }
-      if(Math.abs(root.scrollTop-previous)<1){if(++stalls>10)return fail("stalled");await new Promise(r=>setTimeout(r,60));}
-      else stalls=0;previous=root.scrollTop;
-    }return fail("timeout");
+    }
+  }
+  const sameRect=(a,b)=>["top","bottom","left","right"].every(k=>Math.abs(a[k]-b[k])<=1);
+  function sameLanding(a,b){
+    if(!a||a.msg!==b.msg||a.root!==b.root||a.dest.node!==b.dest.node||a.dest.kind!==b.dest.kind||
+        !sameRect(a.r,b.r)||!sameRect(a.view,b.view)||Math.abs(a.offset-b.offset)>1)return false;
+    const x=a.dest.range,y=b.dest.range;
+    return !x&&!y||!!x&&!!y&&["startContainer","endContainer","startOffset","endOffset"].every(k=>x[k]===y[k]);
+  }
+  async function jump(rows,target,signal,report=()=>{},targetBody){
+    signal?.throwIfAborted();
+    const path=location.pathname,version=sample(),order=new Map(rows.map((r,i)=>[r.id,i])),index=order.get(target.id);
+    const fail=reason=>({ok:false,reason});
+    if(index===undefined)return fail("missing");
+    if(order.size!==rows.length)return fail("target");
+    const row=targetBody===undefined?rows[index]:{...rows[index],body:targetBody},until=performance.now()+12000;
+    let root,shape="",probes=0,low=0,high=Infinity,stable=0,previous,lastReason="unmounted",interrupted=false;
+    let wake,expired=false;
+    const notify=()=>wake?.();
+    const input=e=>{
+      // Native scroll events also result from our own writes; only trusted
+      // user intent cancels. The initiating button event has already run.
+      if(e.isTrusted&&(!e.key||["PageUp","PageDown","Home","End","ArrowUp","ArrowDown"," "].includes(e.key))){
+        interrupted=true;notify();
+      }
+    };
+    const events=["wheel","touchstart","pointerdown","keydown"];
+    const check=()=>{signal?.throwIfAborted();if(interrupted)throw new DOMException("Navigation cancelled","AbortError");};
+    const changed=els=>path!==location.pathname||sample(els)!==version||!!unmatched||wasGenerating;
+    const pause=()=>new Promise(resolve=>{
+      let frame;
+      const done=()=>{if(wake!==done)return;wake=undefined;cancelAnimationFrame(frame);resolve();};
+      wake=done;frame=requestAnimationFrame(()=>{if(wake===done)frame=requestAnimationFrame(done);});
+    });
+    for(const event of events)document.addEventListener(event,input,{capture:true,passive:true});
+    signal?.addEventListener("abort",notify,{once:true});
+    const deadline=setTimeout(()=>{expired=true;notify();},Math.max(0,until-performance.now()));
+    try{
+      while(!expired&&performance.now()<until){
+        check();const els=mounted();if(changed(els))return fail("changed");
+        const found=els.filter(el=>idOf(el)===target.id),msg=found.length===1?found[0]:null;
+        const known=els.filter(el=>rows[order.get(idOf(el))]?.role===source.roleOf(el));
+        const anchor=msg||known.find(el=>inside(el.getBoundingClientRect(),range(scroller(el))))||known[0];
+        const nextRoot=anchor&&scroller(anchor);
+        if(!nextRoot?.isConnected){lastReason="unmounted";previous=null;stable=0;await pause();continue;}
+        const view=range(nextRoot),bounds=axis(nextRoot),nextShape=JSON.stringify([bounds.start,nextRoot.scrollHeight,nextRoot.clientHeight,view]);
+        if(nextRoot!==root||nextShape!==shape){root=nextRoot;shape=nextShape;low=0;high=Infinity;previous=null;stable=0;}
+        const reveal=outerAdjustment(root);
+        if(reveal){check();reveal.root.scrollTo({top:reveal.top,behavior:"instant"});previous=null;stable=0;await pause();continue;}
+        if(found.length){
+          const ready=msg&&source.roleOf(msg)===row.role&&!source.pending(msg)&&!uncertain.has(msg);
+          const dest=ready&&destination(msg,row,target);
+          lastReason=dest?"hidden":"target";
+          if(!dest||!msg.contains(dest.node)||!source.visible(dest.node)){previous=null;stable=0;await pause();continue;}
+          const r=dest.rect();
+          if(!(r?.width>0&&r.height>0)){previous=null;stable=0;await pause();continue;}
+          const next=aligned(root,r.top,view,bounds);
+          if(Math.abs(next-root.scrollTop)>1){
+            check();root.scrollTo({top:next,behavior:"instant"});stable=0;previous=null;
+          }else{
+            // Every observation follows a fresh adapter lookup, including
+            // after the final awaited frames. Never certify a retained node.
+            const current={msg,root,dest,r,view,offset:root.scrollTop};
+            stable=inside(r,view)&&sameLanding(previous,current)?stable+1:0;
+            previous=current;
+            if(stable>=4){check();return {ok:true,kind:dest.kind,probes};}
+          }
+        }else{
+          previous=null;stable=0;lastReason="unmounted";
+          const top=root===document.scrollingElement?0:root.getBoundingClientRect().top;
+          const anchors=known.filter(el=>scroller(el)===root).map(el=>({index:order.get(idOf(el)),r:el.getBoundingClientRect()}))
+            .filter(a=>a.r.width>0&&a.r.height>0).sort((a,b)=>a.index-b.index);
+          // A delayed virtual window may still be entirely offscreen. Wait
+          // within the same deadline; never infer bounds from stale DOM.
+          if(!anchors.some(a=>inside(a.r,view))){await pause();continue;}
+          const max=bounds.extent,position=root.scrollTop-bounds.start,first=anchors[0],last=anchors.at(-1);
+          for(const a of anchors){
+            const y=position+a.r.top-top;
+            if(a.index<index)low=Math.max(low,Math.min(max,y+a.r.height));
+            if(a.index>index)high=Math.min(high,Math.max(0,y));
+          }
+          const average=last.index>first.index?Math.abs(last.r.top-first.r.top)/(last.index-first.index):Math.max(80,first.r.height);
+          let y=position+first.r.top-top+(index-first.index)*average;
+          if(Number.isFinite(high)&&low<high)y=Math.max(low,Math.min(high,y));
+          y=Math.max(0,Math.min(max,y));
+          if(Math.abs(y-position)<2&&low<Math.min(high,max))y=(low+Math.min(high,max))/2;
+          check();report({probes:++probes});check();root.scrollTo({top:bounds.start+y,behavior:"instant"});
+        }
+        await pause();
+      }
+      check();if(changed(mounted()))return fail("changed");return fail(lastReason);
+    }finally{
+      clearTimeout(deadline);signal?.removeEventListener("abort",notify);
+      for(const event of events)document.removeEventListener(event,input,true);
+    }
   }
   function visible(){
-    const els=mounted();if(!els.length)return null;
-    const line=range(scroller(els[0])).top;
-    return idOf(els.find(el=>el.getBoundingClientRect().bottom>line));
+    for(const el of mounted()){
+      const r=el.getBoundingClientRect(),root=scroller(el);if(!root)continue;
+      const view=range(root);
+      if(inside(r,view))return idOf(el);
+    }
+    return null;
+  }
+  function currentSection(row){
+    if(!row||visible()!==row.id)return null;
+    const matches=mounted().filter(el=>idOf(el)===row.id);
+    if(matches.length!==1||source.roleOf(matches[0])!==row.role)return null;
+    const msg=matches[0],target={id:row.id};
+    if(source.pending(msg)||uncertain.has(msg))return target;
+    const view=range(scroller(msg)),heading=titles(msg).filter(el=>{
+      const r=el.getBoundingClientRect();return r.width>0&&r.height>0&&r.top<=view.top+1;
+    }).at(-1);
+    if(!heading)return target;
+    const text=tidy(heading.textContent),level=headingLevel(heading);
+    for(let index=0;index<(row.headings||[]).length;index++){
+      const h=row.headings[index];
+      if(h.text===text&&h.level===level&&destination(msg,row,{heading:index})?.node===heading)return {...target,heading:index};
+    }
+    return target;
   }
   function layout(){
     const viewport=globalThis.visualViewport,top=viewport?.offsetTop||0,height=viewport?.height||innerHeight,width=viewport?.width||innerWidth;
-    const input=document.querySelector("#prompt-textarea,[data-testid='composer-text-input'],form [contenteditable=true]");
+    const input=source.composer();
     const composer=input?.closest("form")||input,rect=composer?.getBoundingClientRect();
     const edge=rect?.height&&rect.top>top+44?Math.min(rect.top-12,top+height-8):top+height-8;
     const reading=mounted().find(n=>n.getBoundingClientRect().bottom>top)?.getBoundingClientRect();
@@ -286,5 +427,5 @@ globalThis.ReaderPageIndex = (() => {
     }
     listener(layout());update();return ()=>layoutListeners.delete(listener);
   }
-  return {mounted,domRows,domBody,fromBranch,metadata,search,leaf,sample,visible,jump,matches,textTarget,destination,layout,observeLayout,generating};
+  return {mounted,idOf,domRows,domBody,fromBranch,metadata,sections,tree,search,leaf,sample,visible,currentSection,jump,matches,textTarget,destination,layout,observeLayout,generating};
 })();

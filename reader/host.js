@@ -4,15 +4,30 @@ const typed=(method,payload)=>({method,headers:{"Content-Type":"application/json
 const uuid=s=>typeof s==="string"&&/^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.test(s);
 async function api(device,path,opts={}){
   const token=await rpc("access",{device});
-  const r=await fetch(READER_ORIGIN+"/api/extension/v1/"+path,{...opts,credentials:"omit",redirect:"error",cache:"no-store",
-    headers:{...opts.headers,Authorization:"Bearer "+token}});
+  let r;
+  try{r=await fetch(READER_ORIGIN+"/api/extension/v1/"+path,{...opts,credentials:"omit",redirect:"error",cache:"no-store",
+    headers:{...opts.headers,Authorization:"Bearer "+token}});}
+  catch(e){if(e.name==="TypeError")e.code="NETWORK_UNAVAILABLE";throw e;}
   if(!r.ok){const e=Error("Reader HTTP "+r.status);e.status=r.status;
-    try{const {detail}=await r.json();if(["READER_TRANSFER_PENDING","FILE_TOO_LARGE","IMPORT_STORAGE_FULL"].includes(detail?.code))e.code=detail.code;}catch{}
+    try{const {detail}=await r.json();e.code=ReaderProgress.diagnostic({category:"unknown",code:detail?.code})?.code;}catch{}
     throw e;}return r;
 }
-async function ledger(key,patch){
+async function ledger(key,patch,owner){
   await navigator.locks.request("reader-jobs",async()=>{
     const jobs=await rpc("jobs"),job=jobs.find(j=>j.key===key);
+    // A delayed progress flush cannot recreate a discarded job or cross accounts.
+    if(owner&&(!job||job.device!==owner||await rpc("device")!==owner))return;
+    patch={...patch};
+    if(patch.step)patch.step=ReaderProgress.snapshot(patch.step);
+    const stats=ReaderProgress.accumulate(ReaderProgress.accumulate(job?.stats,patch.stats),patch.step);
+    if("percent" in patch)Object.assign(stats,ReaderProgress.accumulate(stats,{serverProgress:patch.percent}));
+    if(job?.stats||Object.keys(stats).length||patch.phase==="reading")patch.stats=stats;
+    if("diagnostic" in patch)patch.diagnostic=ReaderProgress.diagnostic(patch.diagnostic);
+    if(["reading","uploading"].includes(patch.phase)&&!Number.isSafeInteger(job?.startedAt))patch.startedAt=Date.now();
+    // An inactive stop freezes elapsed time; resuming the same task keeps its
+    // first start. A received package is still active, not a saved conversation.
+    if(patch.active===true)patch.finishedAt=null;
+    else if(patch.active===false)patch.finishedAt=Number.isSafeInteger(job?.finishedAt)?job.finishedAt:Date.now();
     if(job)Object.assign(job,patch);else jobs.push({key,...patch});
     const batch=await rpc("batch");
     const keep=j=>j.active||j.packageReady||j.phase==="review"||j.phase==="upload-unknown"||!!batch?.id&&j.batch===batch.id;
@@ -46,17 +61,32 @@ async function forgetDetachedDevice(){
     if(uuid(key))await eraseUnretained(key,current);
   }
 }
-function displayProgress(key,device,port){
-  const store=ReaderProgress.throttle(step=>{void ledger(key,{step}).catch(()=>{});},900);
+function displayProgress(key,device,port,initial){
+  let stats=ReaderProgress.accumulate({},initial),writes=Promise.resolve(),failure,closed=false,stage;
+  const store=ReaderProgress.throttle(step=>{
+    writes=writes.then(async()=>{await ledger(key,{step,stats:step},device);failure=null;}).catch(e=>{failure=e;});
+  },900);
   const ui=ReaderProgress.throttle(step=>{try{port?.postMessage({op:"progress",step});}catch{}store.update(step);});
-  return {update:ui.update,close(){ui.flush();store.flush();ui.close();store.close();}};
+  const drain=async()=>{await writes;if(failure)throw failure;};
+  return {update(value){
+    if(closed)return;
+    const step=ReaderProgress.snapshot(value);if(!step)return;
+    stage=step.stage;
+    if(step.stage==="package"&&Number.isSafeInteger(step.done))step.packageBytes=step.done;
+    stats=ReaderProgress.accumulate(stats,step);ui.update({...step,...stats});
+  },get stage(){return stage;},flush(){ui.flush();store.flush();return drain();},
+  close(){if(!closed){ui.flush();store.flush();ui.close();store.close();closed=true;}return drain();}};
 }
 async function deliver(job,file,report){
-  report({stage:"upload"});
-  await ledger(job.key,{phase:"uploading",active:true});
-  const res=await ReaderUpload({key:job.key,file,binding:job.binding,request:(p,opts)=>api(job.device,p,opts),report});
-  if(!uuid(res.id))throw Error("Unconfirmed upload receipt");
-  await ledger(job.key,{iid:res.id,packageReady:false,binding:null,step:null,phase:job.mode==="append"?"append-ready":"received",active:job.mode!=="append",
+  report.update({stage:"upload",packageBytes:file.size});
+  await report.flush();
+  await ledger(job.key,{phase:"uploading",active:true,diagnostic:null});
+  const res=await ReaderUpload({key:job.key,file,binding:job.binding,request:(p,opts)=>api(job.device,p,opts),report:report.update,retryLimit:2,
+    onRetry:()=>ledger(job.key,{diagnostic:{category:"network",stage:"upload",code:"NETWORK_UNAVAILABLE",recovery:"retry_existing"}},job.device)});
+  if(!uuid(res.id))throw Object.assign(Error("Unconfirmed upload receipt"),{code:"UPLOAD_RECEIPT_UNCONFIRMED"});
+  await report.flush();
+  await ledger(job.key,{iid:res.id,packageReady:false,binding:null,stats:{uploadBytes:file.size},diagnostic:null,
+    phase:job.mode==="append"?"append-ready":"received",active:job.mode!=="append",
     ...(job.mode==="append"?{settledAt:Date.now()}:{})});
   await erase(job.key);
 }
@@ -68,25 +98,37 @@ function uploadFailure(e){
   if(e.status===422||e.status===404)return "upload-rejected";
   return "upload-paused";
 }
+function failureDiagnostic(e,stage){
+  const category=e.name==="QuotaExceededError"?"local-storage":e.name==="AbortError"?"cancelled":
+    e.code==="NETWORK_UNAVAILABLE"?"network":e.status===401?"auth":e.status===403?"permission":
+    e.status===413?"limit":e.status===507?"server-storage":e.status===409?"conflict":
+    e.status===404||e.name==="NotFoundError"?"unavailable":
+    e.status===422||["UPLOAD_RECEIPT_INVALID","UPLOAD_OFFSET_INVALID","UPLOAD_RECEIPT_UNCONFIRMED"].includes(e.code)?"protocol":
+    e.status>=500||e.status===429?"server":"unknown";
+  return ReaderProgress.diagnostic({category,stage,status:e.status,code:e.code});
+}
 // Called only while the per-item OPFS/operation lock is held.
 async function advance(job,decision,resume=false,retry=false){
   try{
     if(await rpc("device")!==job.device)return;
     if(job.packageReady){
       const previous=await (await api(job.device,"requests/"+job.key)).json();
-      if(uuid(previous.id)){await ledger(job.key,{iid:previous.id,packageReady:false,binding:null,step:null,active:job.mode!=="append",
+      if(uuid(previous.id)){await ledger(job.key,{iid:previous.id,packageReady:false,binding:null,
+        stats:{uploadBytes:job.binding?.size},diagnostic:null,active:job.mode!=="append",
         phase:job.mode==="append"?"append-ready":"received"});await erase(job.key);return;}
       if(!resume){await ledger(job.key,{phase:"upload-paused",active:false});return;}
-      const report=displayProgress(job.key,job.device);
+      const report=displayProgress(job.key,job.device,null,job.stats);
       try{await initialized;const dir=await (await root).getDirectoryHandle(job.key);
         const file=await (await dir.getFileHandle("import.zip")).getFile();
-        await deliver(job,file,report.update);}
-      catch(e){await ledger(job.key,{phase:e.name==="NotFoundError"?"capture-interrupted":uploadFailure(e),active:false,
+        await deliver(job,file,report);}
+      catch(e){try{await report.close();}catch(problem){e=problem;}await ledger(job.key,{phase:e.name==="NotFoundError"?"capture-interrupted":uploadFailure(e),active:false,
+        diagnostic:failureDiagnostic(e,"upload"),
         ...(e.name==="NotFoundError"?{packageReady:false,binding:null}:{})});}
-      finally{report.close();}return;
+      finally{await report.close().catch(()=>{});}return;
     }
     if(job.phase==="reading"&&!live.has(job.key)){
-      await ledger(job.key,{phase:"capture-interrupted",active:false});return;
+      await ledger(job.key,{phase:"capture-interrupted",active:false,
+        diagnostic:job.diagnostic||{category:"source",stage:ReaderProgress.snapshot(job.step)?.stage||"source",code:"CAPTURE_INTERRUPTED"}});return;
     }
     let iid=job.iid;
     if(!iid){
@@ -105,19 +147,19 @@ async function advance(job,decision,resume=false,retry=false){
       // A device only delivers an excerpt. It can never confirm the destination,
       // consent to a live share, or invoke the ordinary full-import commit.
       if(job.mode!=="append"||s.mode!=="selective_append"||!uuid(iid))throw Error("Source receipt mismatch");
-      const phase=s.status==="committed"?"append-complete":s.status==="failed"?"append-attention":"append-ready";
-      await ledger(job.key,{iid,phase,active:false,review:null});return;
+      await ledger(job.key,{iid,...ReaderProgress.appendReceipt(s),review:null});return;
     }
     if(s.review){
       if(!decision&&(s.review.partial||s.review.live_share||s.review.action==="conflict")){
-        await ledger(job.key,{phase:"review",active:false,review:s.review});return;
+        await ledger(job.key,{phase:"review",active:false,review:s.review,diagnostic:null});return;
       }
-      if(decision&&decision.receipt!==s.review.receipt){await ledger(job.key,{phase:"review",active:false,review:s.review});return;}
+      if(decision&&decision.receipt!==s.review.receipt){await ledger(job.key,{phase:"review",active:false,review:s.review,diagnostic:null});return;}
       await api(job.device,`imports/${iid}/commit`,typed("POST",decision||{receipt:s.review.receipt}));
-      await ledger(job.key,{phase:"queued",active:true,review:null});return;
+      await ledger(job.key,{phase:"queued",active:true,review:null,diagnostic:null});return;
     }
     await ledger(job.key,ReaderTransferState(s));
-  }catch(e){await ledger(job.key,{phase:e.status===401||e.status===403?"reconnect":"check",active:false});}
+  }catch(e){await ledger(job.key,{phase:e.status===401||e.status===403?"reconnect":"check",active:false,
+    diagnostic:failureDiagnostic(e,job.packageReady?"upload":"server")});}
 }
 async function progress(snapshot,decision,resume=false,retry=false){
   await initialized;
@@ -137,11 +179,14 @@ chrome.runtime.onConnect.addListener(port=>{
   let key=crypto.randomUUID(),t,dir,archive,current,assetPath,meta,count=0,finished=false,working=false,closed=false,report,writing=false,assetIndex=0;
   captures.set(port,()=>t?.device);
   const assets=new Map(),usedAssets=new Set();let lastSelectedUser=null,delivered=false,noticed=false;
-  async function clean(reason){
-    report?.close();await Promise.allSettled([archive,current].filter(Boolean).map(w=>w.abort()));
+  async function clean(reason,error){
+    try{await report?.close();}catch(problem){error||=problem;}
+    await Promise.allSettled([archive,current].filter(Boolean).map(w=>w.abort()));
     if(!delivered||t&&await rpc("device")!==t.device)await erase(key);live.delete(key);
     if(t&&!delivered&&!noticed&&await rpc("device")===t.device){
-      noticed=true;await ledger(key,{device:t.device,phase:reason==="cancel"?"cancelled":reason==="quota"?"storage-full":"capture-interrupted",step:null,active:false});
+      noticed=true;await ledger(key,{device:t.device,phase:reason==="cancel"?"cancelled":reason==="quota"?"storage-full":"capture-interrupted",active:false,
+        diagnostic:error?failureDiagnostic(error,report?.stage||"source"):{category:reason==="cancel"?"cancelled":"source",stage:report?.stage||"source",
+          code:reason==="cancel"?"CAPTURE_CANCELLED":"CAPTURE_INTERRUPTED"}});
     }
   }
   port.onDisconnect.addListener(()=>{closed=true;captures.delete(port);if(!working&&!finished)void clean().catch(()=>{});});
@@ -153,7 +198,7 @@ chrome.runtime.onConnect.addListener(port=>{
         if(m.op!=="hello")throw Error("Capture not authorized.");
         t=await rpc("ticket",{ticket:port.name.slice(7),tab:sender.tab.id,doc:sender.documentId});
         if(!uuid(t.attempt)||!t.sourceKey)throw Error("Capture expired.");
-        key=t.attempt;live.add(key);await ledger(key,{device:t.device,sourceKey:t.sourceKey,mode:t.mode==="append"?"append":"save",phase:"reading",active:true,...(t.batch?{batch:t.batch}:{})});
+        key=t.attempt;live.add(key);await ledger(key,{device:t.device,sourceKey:t.sourceKey,mode:t.mode==="append"?"append":"save",phase:"reading",active:true,diagnostic:null,...(t.batch?{batch:t.batch}:{})});
         await initialized;dir=await (await root).getDirectoryHandle(key,{create:true});
         report=displayProgress(key,t.device,port);report.update({stage:"source",pages:1});
       }else if(m.op==="cancel-selection"&&t.mode==="append"&&!meta&&!count&&!delivered){finished=true;await clean("cancel");
@@ -171,7 +216,9 @@ chrome.runtime.onConnect.addListener(port=>{
       }else if(m.op==="endAsset"&&current){await current.close();current=null;
       }else if(m.op==="message-start"&&meta&&!current&&!writing){
         const row=m.row;if(!row||!Array.isArray(row.assets)||row.assets.some(p=>!assets.has(p)))throw Error("Invalid source message");
-        if(t.mode==="append"&&count>=250)throw Error("Select up to 250 messages for one reviewed append.");
+        // Only the worker's one-use capability-bound ticket enables the range
+        // contract. Never accept this permission from a source-page message.
+        if(t.mode==="append"&&t.extendedSelection!==true&&count>=250)throw Error("Select up to 250 messages for one reviewed append.");
         if(t.mode==="append"){
           if(row.sourcePath||!["user","assistant"].includes(row.role)||row.question!=null&&
             (row.role!=="assistant"||row.question!==lastSelectedUser))throw Error("Unselected source relationship");
@@ -191,13 +238,14 @@ chrome.runtime.onConnect.addListener(port=>{
         const job={key,mode:t.mode,device:t.device,binding:{size:zip.size,sha256:meta.zipDigest,project:t.project||null,excerpt:t.mode==="append"}};
         await ledger(key,{...job,phase:"uploading",active:true,partial:meta.partial,losses:m.losses,packageReady:true});delivered=true;
         try{
-          await deliver(job,zip,report.update);
-        }catch(e){await ledger(key,{phase:uploadFailure(e),active:false});throw e;}
+          await deliver(job,zip,report);
+        }catch(e){try{await report.close();}catch(problem){e=problem;}
+          await ledger(key,{phase:uploadFailure(e),active:false,diagnostic:failureDiagnostic(e,"upload")});throw e;}
         finally{live.delete(key);}
-        finished=true;report.close();
+        finished=true;await report.close();
       }else throw Error("Invalid transfer sequence");
       if(!closed)port.postMessage({ok:true});
-    }catch(e){const quota=e.name==="QuotaExceededError";if(!closed)port.postMessage({error:quota?(navigator.language.startsWith("zh")?"浏览器临时空间不足。":"Browser temporary storage is full."):e.message});closed=true;await clean(quota?"quota":null);port.disconnect();}
+    }catch(e){const quota=e.name==="QuotaExceededError";if(!closed)port.postMessage({error:quota?(navigator.language.startsWith("zh")?"浏览器临时空间不足。":"Browser temporary storage is full."):e.message});closed=true;await clean(quota?"quota":null,e);port.disconnect();}
     finally{working=false;if(closed&&!finished)await clean();}
   });
 });
@@ -209,7 +257,11 @@ chrome.runtime.onMessage.addListener((m,s,reply)=>{
   if(m.kind!=="panel-host"||s.id!==chrome.runtime.id)return;
   (async()=>{
     const standalone=s.url===chrome.runtime.getURL("panel.html")&&(!s.tab||s.frameId===0);
-    const center=s.url?.split("?")[0]===chrome.runtime.getURL("center.html")&&s.frameId===0;
+    // Match the worker's centerPage boundary; native extension panels need not
+    // have a tab/frameId. A web-embedded private view still needs its parent grant.
+    let center=false;
+    try{const u=new URL(s.url);center=(s.documentLifecycle===undefined||s.documentLifecycle==="active")&&
+      (s.frameId===0||!s.tab&&s.frameId===undefined)&&u.protocol==="chrome-extension:"&&u.hostname===chrome.runtime.id&&u.pathname==="/center.html";}catch{}
     if(!standalone&&!center&&!(s.url?.split("#")[0]==="chrome-extension://"+chrome.runtime.id+"/frame.html"&&s.frameId>0&&
        await chrome.runtime.sendMessage({kind:"panel-allowed",tab:s.tab.id,doc:s.documentId})))throw Error("Open Reader again.");
     const device=await rpc("device");if(!device||device!==m.device)throw Error("Reader account changed.");
@@ -225,7 +277,7 @@ chrome.runtime.onMessage.addListener((m,s,reply)=>{
         const receipt=await (await api(device,"requests/"+j.key)).json();
         if(receipt.id){await advance(j);return;}
         try{await api(device,"transfers/"+j.key,{method:"DELETE"});}catch(e){if(e.status!==404)throw e;}
-        await ledger(j.key,{phase:"cancelled",active:false,packageReady:false,binding:null,step:null});await erase(j.key);
+        await ledger(j.key,{phase:"cancelled",active:false,packageReady:false,binding:null,diagnostic:null});await erase(j.key);
       });
     }else if((m.op==="download"||m.op==="skill")&&uuid(m.aid)){
       let resp,filename;

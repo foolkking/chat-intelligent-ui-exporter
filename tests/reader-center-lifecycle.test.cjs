@@ -9,14 +9,17 @@ const sleep=n=>new Promise(r=>setTimeout(r,n));
 const deferred=()=>{let resolve;const promise=new Promise(r=>{resolve=r;});return {promise,resolve};};
 async function until(fn){for(let i=0;i<100;i++){if(fn())return;await sleep(5);}assert(fn(),"UI did not reach the expected state");}
 async function fixture({plan=old,jobs=[],shared,search="",tabs=[],rows=[{id:"one",title:"One",group:"unknown"}],
-  projects=[],sourceLookup=false}={}){
+  projects=[],sourceLookup=false,webCreate=false,frame,web,wide=true,archive={}}={}){
   const dir=path.join(__dirname,"../reader"),dom=new JSDOM(fs.readFileSync(path.join(dir,"center.html"),"utf8"),{
     url:"https://extension.example.test/center.html"+search,runScripts:"outside-only"
-  }),w=dom.window,calls=[],requests=[],messages=[],removed=[];
+  }),w=dom.window,calls=[],requests=[],messages=[],removed=[],created=[];
+  if(frame)Object.defineProperty(w,"ReaderFrameContext",{value:Object.freeze(frame)});
+  const mediaListeners=[],media={matches:wide,addEventListener:(_name,fn)=>mediaListeners.push(fn)};
+  w.matchMedia=()=>media;
   shared||={changes:[],locks:new Map(),state:{device:structuredClone(device),batchPlan:structuredClone(plan),jobs:structuredClone(jobs)}};
   const {changes,locks,state}=shared;
   const clone=x=>x===undefined?undefined:structuredClone(x);
-  const backend={projects:clone(projects),sourceLookup,status:async()=>({})};
+  const backend={projects:clone(projects),sourceLookup,webCreate,status:async()=>({}),discover:async()=>clone(web)};
   const storage={
     async get(keys){return Object.fromEntries((typeof keys==="string"?[keys]:keys).map(k=>[k,clone(state[k])]))},
     async set(patch){const c={};for(const [k,v] of Object.entries(patch)){c[k]={oldValue:clone(state[k]),newValue:clone(v)};state[k]=clone(v);}
@@ -34,26 +37,29 @@ async function fixture({plan=old,jobs=[],shared,search="",tabs=[],rows=[{id:"one
   w.navigator.storage={getDirectory:async()=>root};w.READER_ORIGIN=device.origin;w.crypto.randomUUID=()=>crypto.randomUUID();
   w.ChatExportI18n={setLocale(){}};
   w.ReaderProgress={throttle:f=>({update:f,flush(){},close(){}}),describe:()=>"Reading"};
-  w.ReaderLocalArchive={open:async()=>({digest:"same-source",rows:clone(rows),
+  w.ReaderLocalArchive={open:async()=>({digest:"same-source",rows:clone(rows),...archive,
     build:async()=>{calls.push("build");return {file:{size:10},sha256:"a".repeat(64),partial:false,losses:{}};}})};
-  w.ReaderClient={trust:Promise.resolve(),request:async(_d,p,opts={})=>{
+  w.ReaderClient={trust:Promise.resolve(),confirmProject:(d,name)=>backend.confirmProject(d,name),request:async(_d,p,opts={})=>{
     calls.push(p);requests.push({device:_d,path:p,method:opts.method||"GET",body:opts.body});
-    return {json:async()=>p==="capabilities"?{protocol:1,import_profile:"reader-chat-v1",capture:true,resumable_capture:true,source_lookup:backend.sourceLookup}:
+    return {json:async()=>p==="capabilities"?{protocol:1,import_profile:"reader-chat-v1",capture:true,resumable_capture:true,source_lookup:backend.sourceLookup,web_import_project:backend.webCreate}:
       p==="projects"?clone(backend.projects):p==="sources/status"?backend.status(_d,JSON.parse(opts.body)):p.startsWith("requests/")?{id:null}:{}};
   }};
-  w.chrome={storage:{local:storage,onChanged:{addListener:f=>changes.push(f)}},tabs:{create:async()=>{}},
-    runtime:{sendMessage:async m=>{
+  w.chrome={storage:{local:storage,onChanged:{addListener:f=>changes.push(f)}},tabs:{create:async args=>{created.push(clone(args));}},
+    runtime:{getURL:name=>"chrome-extension://"+"a".repeat(32)+"/"+name,sendMessage:async m=>{
       calls.push(m.kind);messages.push(clone(m));
+      if(m.kind==="frame-view")return {ok:true};
       if(m.kind==="wake")return {ok:true};
       if(m.kind==="panel-host")return {ok:true};
       if(m.kind==="batch-tabs")return {tabs:clone(tabs)};
+      if(m.kind==="batch-discover")return backend.discover(m);
       return {};
     }}};
   // Evaluate the selection model and controller in the same window: their Set
   // constructors must match. JSDOM also supplies that realm's URLSearchParams.
-  for(const file of ["batch-model.js","center-selection.js","center.js"])w.eval(fs.readFileSync(path.join(dir,file),"utf8"));
+  for(const file of ["routes.js","batch-model.js","center-selection.js","center-projects.js","center.js"])w.eval(fs.readFileSync(path.join(dir,file),"utf8"));
   await until(()=>!w.document.querySelector("#resume-box").hidden||!plan);
-  return {w,state,calls,requests,messages,removed,storage,shared,backend,close:()=>w.close(),async choose(selected=[0]){
+  return {w,state,calls,requests,messages,removed,created,storage,shared,backend,close:()=>w.close(),
+    resize(wide){media.matches=wide;for(const fn of mediaListeners)fn(media);},async choose(selected=[0]){
     const input=w.document.querySelector("#source-file");Object.defineProperty(input,"files",{value:[{name:"synthetic.zip"}],configurable:true});
     input.dispatchEvent(new w.Event("change"));await until(()=>!w.document.querySelector("#selection-step").hidden);
     const inputs=[...w.document.querySelectorAll("#source-rows input")];
@@ -235,6 +241,87 @@ function selectValue(w,id,value){
   select.dispatchEvent(new w.Event("change"));assert.equal(select.value,value);
 }
 
+const mappingFixture={plan:null,webCreate:true,rows:[{id:"first",title:"Conversation One",group:"project:known"},
+  {id:"second",title:"Conversation Two",group:"project:opaque"}],archive:{groups:{"project:known":"Synthetic A"}}};
+const mappingRow=(f,i)=>f.w.document.querySelector("#mapping-"+i).closest(".mapping-row");
+const submitName=(f,i)=>mappingRow(f,i).querySelector("form").onsubmit(new f.w.Event("submit",{cancelable:true}));
+test("same-name reuse and explicitly named creation freeze only the verified Reader UUIDs in the import plan",async()=>{
+  const f=await fixture({...mappingFixture,projects:[projectRows()[0]]});try{
+    await f.choose([0,1]);const doc=f.w.document;
+    assert.equal(doc.querySelector("#mapping-0").value,"");
+    assert.match(doc.querySelector("#mapping-0").options[1].textContent,/same name/i);
+    mappingRow(f,0).querySelector("button").click();
+    assert.equal(doc.querySelector("#mapping-0").value,projectA);
+    mappingRow(f,1).querySelector("button").click();
+    const field=doc.querySelector("#mapping-1-name");assert.equal(field.value,"");assert.equal(doc.activeElement,field);
+    assert.match(mappingRow(f,1).textContent,/Conversation Two/);
+    assert.equal(doc.querySelector("#confirm-import").disabled,true);
+    field.value="  Synthetic B  ";field.dispatchEvent(new f.w.Event("input"));
+    const created=[];f.backend.confirmProject=async(d,name)=>{created.push([d.id,name]);f.backend.projects.push(projectRows()[1]);return projectB;};
+    await submitName(f,1);assert.deepEqual(created,[[device.id,"Synthetic B"]]);
+    assert.equal(doc.querySelector("#mapping-1").value,projectB);assert.equal(doc.querySelector("#mapping-0").value,projectA);
+    assert.equal(doc.querySelector("#confirm-import").disabled,false);assert.equal(f.state.batchPlan,null);
+    const send=f.w.chrome.runtime.sendMessage;f.w.chrome.runtime.sendMessage=async m=>{
+      const response=await send(m);
+      if(m.kind==="panel-host")await f.storage.set({jobs:f.state.jobs.map(j=>j.key===m.key?{...j,iid,active:false,packageReady:false,phase:"done"}:j)});
+      return response;
+    };
+    doc.querySelector("#remember-mapping").checked=true;await doc.querySelector("#confirm-import").onclick();
+    assert.deepEqual(f.state.batchPlan.items.map(i=>i.project),[projectA,projectB]);
+    assert.deepEqual(f.state.batchMappings[0].targets,{"project:known":projectA,"project:opaque":projectB});
+  }finally{f.close();}
+});
+test("unknown create result preserves the draft; a fresh exact-name choice uses the existing project without creating twice",async()=>{
+  const f=await fixture(mappingFixture);try{
+    await f.choose();mappingRow(f,0).querySelector("button").click();assert.equal(f.w.document.querySelector("#mapping-0-name").value,"Synthetic A");
+    let count=0;f.backend.confirmProject=async()=>{count++;f.backend.projects=projectRows();throw Error("lost reply");};
+    await submitName(f,0);assert.match(mappingRow(f,0).textContent,/refresh/i);assert.equal(f.w.document.querySelector("#confirm-import").disabled,true);
+    await f.w.document.querySelector("#reload-projects").onclick();await submitName(f,0);
+    assert.equal(count,1);assert.equal(f.w.document.querySelector("#mapping-0").value,projectA);
+  }finally{f.close();}
+});
+test("older Reader can create in its sidebar and the next refresh resolves only the originating named row",async()=>{
+  const f=await fixture({...mappingFixture,webCreate:false});try{
+    await f.choose([0,1]);mappingRow(f,0).querySelector("button").click();await submitName(f,0);
+    assert.deepEqual(f.created,[{url:device.origin+"/"}]);assert.match(mappingRow(f,0).textContent,/sidebar/i);
+    assert.equal(f.w.document.querySelector("#confirm-import").disabled,true);
+    f.backend.projects=projectRows();await f.w.document.querySelector("#reload-projects").onclick();
+    assert.equal(f.w.document.querySelector("#mapping-0").value,projectA);assert.equal(f.w.document.querySelector("#mapping-1").value,"");
+    assert.ok(f.requests.every(r=>r.method==="GET"));
+  }finally{f.close();}
+});
+test("URL-slug aliases retain a remembered destination or explicit Unclassified; conflicting past choices require review",async()=>{
+  const group="project:g-p-"+"0123456789abcdef".repeat(2);
+  const source=webSource([{id:"one",title:"Same project with an old URL slug",group}],{hint:null});
+  for(const [targets,expected] of [[{[group+"-old-name"]:projectA},projectA],
+    [{[group+"-old-name"]:null},""],[{[group+"-old-name"]:projectA,[group]:projectB},"unavailable"]]){
+    const f=await fixture({plan:null,web:source,projects:projectRows(),tabs:[{id:17,title:"Source"}]});try{
+      await f.storage.set({batchMappings:[{origin:device.origin,user:device.user,source:source.scope,targets:{"*":projectB,...targets}}]});
+      const doc=await openWeb(f);checkRow(doc);await doc.querySelector("#to-target").onclick();
+      assert.equal(doc.querySelector("#mapping-0").value,expected);
+      assert.equal(doc.querySelector("#confirm-import").disabled,expected==="unavailable");assert.equal(f.state.batchPlan,null);
+    }finally{f.close();}
+  }
+});
+test("a delayed confirmation cannot select a project after switching Reader account, source, or row choice",async()=>{
+  for(const change of ["account","source","selection"]){
+    const f=await fixture({...mappingFixture,projects:[projectRows()[1]]}),entered=deferred(),reply=deferred();let pending;
+    try{
+      await f.choose([0,1]);mappingRow(f,0).querySelector("button").click();
+      f.backend.confirmProject=async()=>{entered.resolve();return reply.promise;};pending=submitName(f,0);await entered.promise;
+      const doc=f.w.document;
+      if(change==="account"){
+        await f.storage.set({device:{...device,id:projectB,user:"other"}});await until(()=>!doc.querySelector("#confirm-import").disabled);
+      }else if(change==="source"){
+        await doc.querySelector("#back-selection").onclick();await doc.querySelector("#back-source").onclick();
+        f.w.ReaderLocalArchive.open=async()=>({digest:"different",rows:[{id:"different",title:"Another source",group:"project:known"}]});await f.choose();
+      }else selectValue(f.w,"mapping-0",projectB);
+      f.backend.projects=projectRows();reply.resolve(projectA);await pending;
+      assert.equal(doc.querySelector("#mapping-0").value,change==="selection"?projectB:"");assert.equal(f.state.batchPlan,null);
+    }finally{reply.resolve(projectA);await pending;f.close();}
+  }
+});
+
 test("saved-reference lookup requires an explicit click and sends only the selected source ids",async()=>{
   const f=await fixture({plan:null,rows:sourceRows(),sourceLookup:true});
   try{
@@ -320,5 +407,253 @@ test("refreshing Reader projects preserves the current per-project mapping, atta
     assert.equal(f.state.batchPlan,null);assert.deepEqual(f.state.jobs,[]);
     assert.equal(f.requests.some(r=>r.method!=="GET"),false);
     assert.equal(f.w.document.querySelector("#error").textContent,"");
+  }finally{f.close();}
+});
+
+test("embedded import uses the claimed tab hint, suppresses duplicate header and switches library by message only",async()=>{
+  const f=await fixture({frame:{view:"import",tab:17},search:"?tab=8",tabs:[{id:8,title:"Query tab"},{id:17,title:"Bound tab"}]});
+  try{
+    const doc=f.w.document,link=doc.querySelector("#library-link");
+    assert.equal(doc.querySelector(".center-head").hidden,true);
+    assert.equal(link.closest("[hidden]"),null,"the existing library action remains discoverable");
+    assert.deepEqual(f.messages,[],"embedding still does not auto-discover a source or query Reader");
+    await link.onclick();
+    assert.deepEqual(f.messages,[{kind:"frame-view",view:"library"}]);assert.deepEqual(f.created,[]);
+    await doc.querySelector("#web-source").onclick();
+    assert.match(doc.querySelector("#web-tabs button").textContent,/Bound tab.*Opened from this tab/);
+    assert.equal(f.messages.some(m=>m.kind==="batch-discover"),false);
+    await doc.querySelector("#resume-plan").onclick();
+    assert.equal(link.closest("[hidden]"),null,"step transitions retain the same library action");
+    assert.equal(link.isConnected,true);
+  }finally{f.close();}
+});
+test("standalone center keeps its header and explicit library new-tab behavior",async()=>{
+  const f=await fixture();try{
+    assert.equal(f.w.document.querySelector(".center-head").hidden,false);
+    await f.w.document.querySelector("#library-link").onclick();
+    assert.deepEqual(f.created,[{url:"chrome-extension://"+"a".repeat(32)+"/panel.html"}]);
+    assert.deepEqual(f.messages,[]);
+  }finally{f.close();}
+});
+test("switching an embedded import to library and hiding it does not interrupt an active queue or lose its item",async()=>{
+  const job={device:device.id,key,active:true,phase:"reading",local:true,batch:old.id};
+  const f=await fixture({frame:{view:"import",tab:17},jobs:[job]});let run,timeout;
+  try{
+    const doc=f.w.document;await doc.querySelector("#resume-plan").onclick();
+    const input=doc.querySelector("#resume-file");
+    Object.defineProperty(input,"files",{value:[{name:"synthetic.zip"}],configurable:true});await input.onchange();
+    let finished=false;run=doc.querySelector("#continue-queue").onclick().then(()=>{finished=true;});
+    await until(()=>f.calls.includes("wake"));
+    await doc.querySelector("#library-link").onclick();
+    Object.defineProperty(doc,"visibilityState",{value:"hidden",configurable:true});
+    doc.dispatchEvent(new f.w.Event("visibilitychange"));await sleep(80);
+    assert.equal(finished,false);assert.equal(f.state.batchPlan.id,old.id);
+    assert.equal(f.state.batchPlan.items[0].key,key);assert.deepEqual(f.removed,[]);assert.deepEqual(f.created,[]);
+    assert.equal(f.calls.some(p=>p==="build"||p==="panel-host"||p.startsWith("requests/")),false);
+    await f.storage.set({jobs:[{...job,iid,active:false,phase:"done",result:{completeness:"complete",action:"created"}}]});
+    await Promise.race([run,new Promise((_,reject)=>{timeout=setTimeout(()=>reject(Error("Hidden queue did not observe completion")),2000);})]);
+    assert.equal(finished,true);assert.equal(f.state.jobs.length,1);assert.equal(f.state.jobs[0].key,key);
+    assert.equal(doc.querySelector("#error").textContent,"");
+  }finally{clearTimeout(timeout);f.close();}
+});
+
+const webRows=(n=155)=>Array.from({length:n},(_,i)=>({id:"web-"+i,title:"Synthetic "+String(i).padStart(3,"0"),
+  group:i===n-1?"unknown":"project:p"+Math.floor(i/55)}));
+const webSource=(rows=webRows(),patch={})=>({rows,groups:{"project:p0":"Same name","project:p1":"Same name","project:p2":"Third"},
+  scope:"a".repeat(64),catalog:"catalog-1",complete:false,hint:"project:p1",...patch});
+async function openWeb(f){
+  const doc=f.w.document;await doc.querySelector("#web-source").onclick();
+  await doc.querySelector("#web-tabs button").onclick();
+  assert.equal(doc.querySelector("#selection-step").hidden,false);return doc;
+}
+function groupButton(doc,group){return [...doc.querySelectorAll("#project-groups button[data-group]")].find(n=>n.dataset.group===group);}
+function checkRow(doc,index=0){doc.querySelectorAll("#source-rows input")[index].click();}
+test("compact projects collapse separately from selection; expanding to a wide project list retains the exact conversation pane and choice",async()=>{
+  const f=await fixture({plan:null,web:webSource(),tabs:[{id:17,title:"Synthetic source"}],wide:false});try{
+    const doc=await openWeb(f),button=groupButton(doc,"project:p1"),pane=doc.querySelector("#conversation-pane");
+    assert.ok(button);assert.equal(button.getAttribute("aria-expanded"),"true");
+    assert.equal(doc.querySelectorAll("#source-rows input:checked").length,0,"project entry is a filter hint, never selection");
+    checkRow(doc);assert.match(doc.querySelector("#selected-count").textContent,/1 selected/);
+    await button.onclick();assert.equal(pane.hidden,true);assert.equal(button.getAttribute("aria-expanded"),"false");
+    await button.onclick();assert.equal(pane.hidden,false);assert.equal(doc.querySelector("#source-rows input").checked,true);
+    f.resize(true);assert.equal(pane.parentElement.className,"catalogue-layout");assert.equal(pane.hidden,false);
+    assert.equal(groupButton(doc,"project:p1").getAttribute("aria-current"),"true");
+    f.resize(false);assert.equal(pane.closest("li").dataset.group,"project:p1");
+    assert.equal(doc.querySelectorAll("#conversation-pane").length,1);assert.equal(doc.querySelector("#source-rows input").checked,true);
+    assert.deepEqual(f.requests,[]);assert.equal(f.messages.some(m=>m.kind==="batch-capture"),false);
+  }finally{f.close();}
+});
+test("current discovered range is tri-state and fixed across pages, same-title groups and review-selected removal",async()=>{
+  const f=await fixture({plan:null,web:webSource(),tabs:[{id:17,title:"Synthetic source"}]});try{
+    const doc=await openWeb(f),all=doc.querySelector("#select-visible");
+    assert.equal(all.type,"checkbox");assert.equal(all.checked,false);assert.match(doc.querySelector("#scope-label").textContent,/discovered.*55/);
+    checkRow(doc);assert.equal(all.indeterminate,true);assert.equal(all.checked,false);
+    all.click();assert.match(doc.querySelector("#selected-count").textContent,/55 selected/);
+    doc.querySelector("#source-more").click();assert.equal(doc.querySelectorAll("#source-rows input:checked").length,5);
+    await groupButton(doc,"project:p0").onclick();checkRow(doc);
+    assert.equal(doc.querySelector("#source-group").value,"project:p0","compact project shortcut must follow the selected project");
+    assert.match(doc.querySelector("#selected-count").textContent,/56 selected/);
+    selectValue(f.w,"selection-view","selected");assert.equal(doc.querySelectorAll("#source-rows li").length,50);
+    checkRow(doc);assert.match(doc.querySelector("#selected-count").textContent,/55 selected/);
+    assert.equal(doc.querySelectorAll("#source-rows li").length,50);
+    assert.match(doc.querySelector("#source-status").textContent,/partial directory/);
+    assert.match(doc.querySelector("#saved-state-note").textContent,/not checked/);
+    assert.doesNotMatch(doc.querySelector("#selection-step").textContent,/Not imported|未导入/);
+  }finally{f.close();}
+});
+test("project checkboxes select only discovered members even for a fabricated complete web catalogue",async()=>{
+  const f=await fixture({plan:null,web:webSource(webRows(),{complete:true}),tabs:[{id:17,title:"Synthetic source"}]});try{
+    const doc=await openWeb(f),box=doc.querySelector('li[data-group="project:p0"] input');
+    assert.ok(box);box.click();assert.match(doc.querySelector("#selected-count").textContent,/55 selected/);
+    assert.equal(doc.querySelector("#select-project").disabled,true);
+    assert.match(doc.querySelector("#source-status").textContent,/partial directory/);
+    assert.deepEqual(f.requests,[]);assert.equal(f.messages.some(m=>m.kind==="batch-capture"),false);
+  }finally{f.close();}
+});
+test("web refresh retains surviving selections but reports missing or reassigned rows without selecting newly discovered ones",async()=>{
+  const initial=webRows(),f=await fixture({plan:null,web:webSource(initial),tabs:[{id:17,title:"Synthetic source"}]});try{
+    const doc=await openWeb(f);checkRow(doc,0);checkRow(doc,1);checkRow(doc,2);
+    f.backend.discover=async()=>webSource([...initial.filter(r=>r.id!=="web-56").map(r=>r.id==="web-57"?{...r,group:"unknown"}:r),
+      {id:"new",title:"Newly discovered",group:"project:p1"}],{catalog:"catalog-2"});
+    await doc.querySelector("#refresh-source").onclick();
+    assert.match(doc.querySelector("#selected-count").textContent,/1 selected/);
+    assert.match(doc.querySelector("#refresh-status").textContent,/2.*removed/);
+    selectValue(f.w,"selection-view","selected");assert.equal(doc.querySelectorAll("#source-rows li").length,1);
+    assert.match(doc.querySelector("#source-rows").textContent,/Synthetic 055/);
+    assert.deepEqual(f.requests,[]);assert.equal(f.state.batchPlan,null);
+  }finally{f.close();}
+});
+test("a changed or unknown workspace refresh preserves the old draft but blocks confirmation; a failed refresh does not become an empty catalogue",async()=>{
+  const f=await fixture({plan:null,web:webSource(),tabs:[{id:17,title:"Synthetic source"}]});try{
+    const doc=await openWeb(f);checkRow(doc);const before=doc.querySelector("#source-rows").textContent;
+    f.backend.discover=async()=>webSource([],{scope:"other"});
+    await doc.querySelector("#refresh-source").onclick();
+    assert.equal(doc.querySelector("#source-rows").textContent,before);
+    assert.match(doc.querySelector("#selected-count").textContent,/1 selected/);
+    assert.equal(doc.querySelector("#to-target").disabled,true);
+    assert.match(doc.querySelector("#error").textContent,/changed/);
+    f.backend.discover=async()=>webSource();
+    await doc.querySelector("#refresh-source").onclick();assert.equal(doc.querySelector("#to-target").disabled,false);
+    f.backend.discover=async()=>({error:"source-unavailable"});
+    await doc.querySelector("#refresh-source").onclick();
+    assert.equal(doc.querySelector("#source-rows").textContent,before);assert.match(doc.querySelector("#selected-count").textContent,/1 selected/);
+  }finally{f.close();}
+});
+test("changing source offers return to the unmodified draft; a late discovery after return cannot replace it",async()=>{
+  const f=await fixture({plan:null,web:webSource(),tabs:[{id:17,title:"Synthetic source"}]});let pending;
+  const release=deferred();try{
+    const doc=await openWeb(f);checkRow(doc);
+    await doc.querySelector("#back-source").onclick();assert.equal(doc.querySelector("#source-step").hidden,false);
+    assert.equal(doc.querySelector("#return-selection").hidden,false);
+    f.backend.discover=()=>release.promise;
+    await doc.querySelector("#web-source").onclick();pending=doc.querySelector("#web-tabs button").onclick();
+    await doc.querySelector("#return-selection").onclick();release.resolve(webSource([],{scope:"other"}));await pending;
+    assert.equal(doc.querySelector("#selection-step").hidden,false);assert.match(doc.querySelector("#selected-count").textContent,/1 selected/);
+    assert.equal(doc.querySelectorAll("#source-rows li").length,50);
+  }finally{release.resolve({error:"source-unavailable"});await pending;f.close();}
+});
+test("project navigation and conversation DOM stay bounded with 3007 source groups and every later project remains reachable",async()=>{
+  const rows=Array.from({length:3007},(_,i)=>({id:"r"+i,title:"Synthetic "+i,group:"project:g"+i}));
+  const f=await fixture({plan:null,web:webSource(rows,{hint:null}),tabs:[{id:17,title:"Synthetic source"}]});try{
+    const doc=await openWeb(f);
+    assert.ok(doc.querySelectorAll("#project-groups>li").length<=51);assert.ok(doc.querySelectorAll("#source-group option").length<=52);
+    assert.equal(doc.querySelectorAll("#source-rows li").length,50);
+    for(let page=0;page<60;page++)await doc.querySelector("#project-next").onclick();
+    assert.ok(groupButton(doc,"project:g3006"));await groupButton(doc,"project:g3006").onclick();
+    assert.equal(doc.querySelectorAll("#source-rows li").length,1);assert.match(doc.querySelector("#source-rows").textContent,/Synthetic 3006/);
+    checkRow(doc);assert.match(doc.querySelector("#selected-count").textContent,/1 selected/);
+    assert.ok(doc.querySelectorAll("#project-groups>li").length<=51);
+  }finally{f.close();}
+});
+test("local export project proof remains explicit and target mappings keep both groups after compact navigation",async()=>{
+  const rows=[{id:"a",title:"First",group:"project:a"},{id:"b",title:"Second",group:"project:b"},
+    {id:"c",title:"Unclassified",group:"unclassified"}];
+  const f=await fixture({plan:null,rows,wide:false,archive:{digest:"b".repeat(64),complete:true},projects:projectRows()});try{
+    const doc=f.w.document,input=doc.querySelector("#source-file");
+    Object.defineProperty(input,"files",{value:[{name:"synthetic.zip"}],configurable:true});await input.onchange();
+    assert.equal(doc.querySelector("#refresh-source").hidden,true);
+    await groupButton(doc,"project:a").onclick();
+    assert.equal(doc.querySelector("#select-project").disabled,false);await doc.querySelector("#select-project").onclick();
+    await groupButton(doc,"project:b").onclick();checkRow(doc);await doc.querySelector("#to-target").onclick();
+    selectValue(f.w,"mapping-0",projectA);selectValue(f.w,"mapping-1",projectB);
+    doc.querySelector("#include-files").checked=false;
+    await doc.querySelector("#back-selection").onclick();f.resize(true);
+    assert.match(doc.querySelector("#selected-count").textContent,/2 selected/);await doc.querySelector("#to-target").onclick();
+    assert.equal(doc.querySelector("#mapping-0").value,projectA);assert.equal(doc.querySelector("#mapping-1").value,projectB);
+    assert.equal(doc.querySelector("#include-files").checked,false);assert.equal(f.state.batchPlan,null);
+  }finally{f.close();}
+});
+test("same-name project buttons filter by stable identity; unknown membership is not unclassified and scope-unknown stays gated",async()=>{
+  const rows=[{id:"a",title:"First",group:"project:p0"},{id:"b",title:"Second",group:"project:p1"},
+    {id:"c",title:"Unknown row",group:"unknown"},{id:"d",title:"Unclassified row",group:"unclassified"}];
+  const f=await fixture({plan:null,web:webSource(rows,{scope:null}),tabs:[{id:17,title:"Synthetic source"}]});try{
+    const doc=await openWeb(f);
+    assert.equal(doc.querySelector("#source-group").value,"","unverified project hint must not filter");
+    await groupButton(doc,"project:p0").onclick();assert.match(doc.querySelector("#source-rows").textContent,/First/);
+    await groupButton(doc,"project:p1").onclick();assert.match(doc.querySelector("#source-rows").textContent,/Second/);
+    await groupButton(doc,"unknown").onclick();assert.match(doc.querySelector("#source-rows").textContent,/Unknown row/);
+    assert.doesNotMatch(doc.querySelector("#source-rows").textContent,/Unclassified row/);
+    checkRow(doc);assert.equal(doc.querySelector("#to-target").disabled,true);
+    await doc.querySelector("#to-target").onclick();assert.equal(doc.querySelector("#target-step").hidden,true);
+    assert.deepEqual(f.requests,[]);
+  }finally{f.close();}
+});
+test("the last explicitly chosen source wins when two discoveries finish out of order",async()=>{
+  const f=await fixture({plan:null,tabs:[{id:1,title:"First tab"},{id:2,title:"Second tab"}]});
+  const a=deferred(),b=deferred();let first,second;
+  try{
+    const doc=f.w.document;f.backend.discover=m=>m.tab===1?a.promise:b.promise;
+    await doc.querySelector("#web-source").onclick();const choices=doc.querySelectorAll("#web-tabs button");
+    first=choices[0].onclick();second=choices[1].onclick();
+    b.resolve(webSource([{id:"b",title:"Second chosen source",group:"unknown"}]));await second;
+    a.resolve(webSource([{id:"a",title:"First stale source",group:"unknown"}]));await first;
+    assert.match(doc.querySelector("#source-rows").textContent,/Second chosen source/);
+    assert.doesNotMatch(doc.querySelector("#source-rows").textContent,/First stale source/);assert.equal(f.state.batchPlan,null);
+  }finally{a.resolve({error:"source-unavailable"});b.resolve({error:"source-unavailable"});await first;await second;f.close();}
+});
+test("Reader account changes invalidate a held source refresh without replacing the draft or issuing any import",async()=>{
+  const f=await fixture({plan:null,web:webSource(),tabs:[{id:17,title:"Synthetic source"}]}),release=deferred();let pending;
+  try{
+    const doc=await openWeb(f);checkRow(doc);f.backend.discover=()=>release.promise;
+    pending=doc.querySelector("#refresh-source").onclick();assert.equal(doc.querySelector("#to-target").disabled,true);
+    await f.storage.set({device:{...device,id:"other-device",user:"other-user"}});
+    release.resolve(webSource([]));await pending;
+    assert.match(doc.querySelector("#selected-count").textContent,/1 selected/);
+    assert.equal(doc.querySelectorAll("#source-rows li").length,50);
+    assert.equal(doc.querySelector("#refresh-source").disabled,false);assert.equal(f.state.batchPlan,null);
+    assert.equal(doc.querySelector("#to-target").disabled,true,"cancelled verification must not permit a stale draft to continue");
+    assert.match(doc.querySelector("#refresh-status").textContent,/cancelled/i);
+    assert.doesNotMatch(doc.querySelector("#refresh-status").textContent,/Rechecking/);
+    assert.equal(f.messages.some(m=>["batch-capture","panel-host"].includes(m.kind)),false);
+  }finally{release.resolve({error:"source-unavailable"});await pending;f.close();}
+});
+test("returning to a draft after cancelling its refresh keeps selections but requires source verification again",async()=>{
+  const f=await fixture({plan:null,web:webSource(),tabs:[{id:17,title:"Synthetic source"}]}),release=deferred();let pending;
+  try{
+    const doc=await openWeb(f);checkRow(doc);f.backend.discover=()=>release.promise;
+    pending=doc.querySelector("#refresh-source").onclick();
+    await doc.querySelector("#back-source").onclick();await doc.querySelector("#return-selection").onclick();
+    release.resolve(webSource([]));await pending;
+    assert.match(doc.querySelector("#selected-count").textContent,/1 selected/);
+    assert.equal(doc.querySelectorAll("#source-rows li").length,50);
+    assert.equal(doc.querySelector("#to-target").disabled,true);
+    assert.match(doc.querySelector("#refresh-status").textContent,/cancelled/i);
+    f.backend.discover=async()=>webSource();await doc.querySelector("#refresh-source").onclick();
+    assert.equal(doc.querySelector("#to-target").disabled,false);
+    assert.match(doc.querySelector("#selected-count").textContent,/1 selected/);
+    assert.equal(f.state.batchPlan,null);
+  }finally{release.resolve({error:"source-unavailable"});await pending;f.close();}
+});
+test("resizing the selection keeps focused checkbox and changing pages leaves a keyboard-reachable project control",async()=>{
+  const rows=Array.from({length:60},(_,i)=>({id:"r"+i,title:"Synthetic "+i,group:"project:g"+i}));
+  const f=await fixture({plan:null,web:webSource(rows,{hint:null}),wide:true,tabs:[{id:17,title:"Synthetic source"}]});try{
+    const doc=await openWeb(f),check=doc.querySelector("#source-rows input");check.focus();
+    f.resize(false);assert.equal(doc.activeElement,check);f.resize(true);assert.equal(doc.activeElement,check);
+    await doc.querySelector("#project-next").onclick();
+    assert.equal(doc.activeElement,groupButton(doc,""));
+    await groupButton(doc,"project:g59").onclick();checkRow(doc);
+    await doc.querySelector("#project-prev").onclick();f.resize(false);
+    assert.equal(doc.querySelector("#conversation-pane").closest("li").dataset.group,"project:g59");
+    assert.equal(doc.querySelector("#source-rows input").checked,true);
   }finally{f.close();}
 });

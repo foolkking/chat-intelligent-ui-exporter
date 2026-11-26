@@ -170,7 +170,13 @@
         normalized.dilSource = (message.content?.parts || []).filter(p=>typeof p==='string').join('\n');
         normalized.contentReferences = message.metadata.content_references || [];
       }
-      const md = normalized.md || (needsAssets ? `> ${t('md.needsImages')}` : '');
+      // Consumers read either profile, not the summary. Keep an image-only
+      // message visible even when its unsupported pointer supplied no text.
+      if (!normalized.md.trim() && needsAssets) {
+        normalized.md = `> ${t('md.needsImages')}`;
+        normalized.mdEscaped = normalized.md;
+      }
+      const md = normalized.md;
       // The time and model are shown in the sidebar and, when asked, written into the Markdown.
       if (md.trim()) result.push({id:message.id, role, ...normalized, createTime:Number.isFinite(message.create_time) ? message.create_time : undefined, model:role === 'assistant' ? message.metadata?.model_slug : undefined, summary:md.replace(/\s+/g,' ').slice(0,100)});
     }

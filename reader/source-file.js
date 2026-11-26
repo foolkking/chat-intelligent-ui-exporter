@@ -63,12 +63,14 @@ globalThis.ReaderSourceFile = (() => {
       if(state!=="done")invalid();
     }finally{await stream.cancel().catch(()=>{});stream.releaseLock();}
   }
-  async function header(file,check) {
+  async function header(file,check,projectNames=false) {
     const fields=new Map(),get=fileReader(file);
     const wanted=new Set(["id","conversation_id","project_id","title","update_time","mapping","messages","current_node","page_info"]);
+    if(projectNames){wanted.add("project_name");wanted.add("project_title");}
     for await(const f of entries(file,0,file.size,true,check)) {
       if(!wanted.has(f.key))continue;
       if(fields.has(f.key))invalid();
+      if((f.key==="project_name"||f.key==="project_title")&&f.end-f.start>8192){fields.set(f.key,null);continue;}
       fields.set(f.key,["mapping","messages"].includes(f.key)?f:await get(f.start,f.end));
     }
     return Object.fromEntries(fields);
@@ -129,7 +131,10 @@ globalThis.ReaderSourceFile = (() => {
         }
       }
     }
-    return {title:h.title||"ChatGPT",branch:last,source:"conversation-tree",ids,rows,row,warnings};
+    // DOM attributes can name mapping nodes rather than message IDs. Expose
+    // only aliases on the validated branch; keep row IDs and wire paths intact.
+    const identities=new Set([...branch,...ids]);
+    return {title:h.title||"ChatGPT",branch:last,source:"conversation-tree",ids,identities,rows,row,warnings};
   }
   // The fork owns source selection and requests. These callbacks only consume each authorized response.
   function conversation(id,leaf,check,report=()=>{}) {

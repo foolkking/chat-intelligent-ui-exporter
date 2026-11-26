@@ -2,8 +2,8 @@ const fs=require("node:fs"),path=require("node:path"),http=require("node:http"),
 const repo=path.resolve(__dirname,".."),base=process.env.TEMP;
 if(!base||!/^E:\\chat-reader-temp\\|^C:\\Users\\86182\\Desktop\\wkkk\\/i.test(base))throw Error("Use an approved per-task TEMP.");
 const out=fs.mkdtempSync(path.join(base,"nav-bound-entry-"));
-const names=["glyphs.js","progress.js","routes.js","page-index.js","overlay.js","source-control.js"],scripts=Object.fromEntries(names.map(n=>[n,fs.readFileSync(path.join(repo,"reader",n),"utf8")]));
-const hashes=()=>Object.fromEntries(names.map(n=>[n,crypto.createHash("sha256").update(fs.readFileSync(path.join(repo,"reader",n))).digest("hex")]));
+const names=["source-dom.js","glyphs.js","progress.js","progress-view.js","routes.js","surface-state.js","page-index.js","outline-tree.js","overlay.js","source-control.js"],scripts=Object.fromEntries(names.map(n=>[n,fs.readFileSync(path.join(repo,n==="source-dom.js"?"extension":"reader",n),"utf8")]));
+const hashes=()=>Object.fromEntries(names.map(n=>[n,crypto.createHash("sha256").update(scripts[n]).digest("hex")]));
 const report={at:new Date().toISOString(),kind:"Actual isolated Edge, real navigation/control scripts with synthetic page and chrome.runtime stub. Not live ChatGPT or Reader E2E.",before:hashes(),scenarios:[]};
 let browser,server;
 const html=`<!doctype html><html><head><meta charset=utf-8><style>html,body{margin:0;font:16px/1.6 system-ui;background:#faf9f6;color:#27332e}main{width:min(700px,calc(100% - 32px));margin:auto}article{height:1800px}form{position:fixed;bottom:8px;left:50%;transform:translateX(-50%);width:min(680px,calc(100% - 24px));height:52px;border:1px solid #d6dad3;background:#faf9f6;border-radius:8px}#prompt-textarea{padding:8px}@media(prefers-color-scheme:dark){html,body,form{background:#222420;color:#f0f0e9}}</style></head><body data-current-node-id=synthetic-leaf><main><article data-message-id=m0 data-message-author-role=user><div class=markdown>合成正文 · Synthetic article, unchanged by Reader tools.</div></article></main><form><div contenteditable=true id=prompt-textarea>合成输入框 · Synthetic composer</div></form></body></html>`;
@@ -38,7 +38,7 @@ async function next(page,word){
       ReaderSourceControl({pathId:()=>ReaderRoutes.chat(location.pathname),capture:async()=>{__captures++;},cancel(){}});
       window.__nav=__roots[0];window.__save=__roots[1];window.__width=document.querySelector("main").getBoundingClientRect().width;
     });
-    await click(page,"__nav",".handle");await page.waitForFunction(()=>__nav.querySelector(".entry")&&!__nav.querySelector(".status").textContent.includes("Reading"));
+    await click(page,"__save",".open-workspace");await page.waitForFunction(()=>__nav.querySelector(".entry")&&!__nav.querySelector(".status").textContent.includes("Reading"));
     ok("no eager body preload",await page.evaluate(()=>__reads.length===0));
     const pos=await page.evaluate(()=>{const r=__nav.querySelector(".entry").getBoundingClientRect();return{x:r.x+60,y:r.y+10};});await page.mouse.move(pos.x,pos.y);
     await page.waitForFunction(()=>__nav.querySelector(".question-preview .body")?.textContent===__body);

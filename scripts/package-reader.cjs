@@ -17,13 +17,13 @@ function copyMember(src,dest){
   fs.writeFileSync(dest,text?Buffer.from(b.toString("latin1").replace(/\r\n/g,"\n"),"latin1"):b,{flag:"wx"});
 }
 for (const name of ["background.js","client.js","source-actions.js","source-control.js","append-picker.js","capture.js","glyphs.js","visible.js","package.js","host.js","host.html","transfer-state.js",
-                    "progress.js","sha256.js","upload.js","source-file.js","routes.js","surfaces.js","frame.html","frame.js","page-index.js","overlay.js",
-                    "center.html","center.css","center.js","center-selection.js","batch-model.js","zip-source.js","archive-source.js","workspace.js","batch-worker.js",
+                    "progress.js","progress-view.js","sha256.js","upload.js","source-file.js","routes.js","surface-state.js","surfaces.js","frame.html","frame.js","page-index.js","outline-tree.js","overlay.js",
+                    "center.html","center.css","center.js","center-selection.js","center-projects.js","batch-model.js","zip-source.js","archive-source.js","workspace.js","batch-worker.js",
                     "panel.html","panel.js","panel-jobs.js","panel-export.js","panel.css","vendor/fflate-0.8.3.js","vendor/fflate-LICENSE.txt"]){
   copyMember(path.join(root,"reader",name),path.join(out,name));
 }
 for (const size of [16,32,48,128])copyMember(path.join(root,"reader/icons",`icon${size}.png`),path.join(out,"icons",`icon${size}.png`));
-for (const name of ["fast-text.js","i18n.js","locales/en.js","locales/zh_CN.js","THIRD_PARTY_NOTICES.md"]) {
+for (const name of ["fast-text.js","source-dom.js","i18n.js","locales/en.js","locales/zh_CN.js","THIRD_PARTY_NOTICES.md"]) {
   copyMember(path.join(root,"extension",name),path.join(out,name));
 }
 const licenseDir=path.join(root,"extension/licenses");
@@ -36,11 +36,12 @@ fs.writeFileSync(path.join(out,"manifest.json"),JSON.stringify({
   manifest_version:3, minimum_chrome_version:"116", name:"Chat Reader", version:"0.3.0", key,
   description:"Browse your Reader library and save the current conversation.",
   action:{default_title:"Chat Reader",default_icon:{"16":"icons/icon16.png","32":"icons/icon32.png"}},icons:{"16":"icons/icon16.png","32":"icons/icon32.png","48":"icons/icon48.png","128":"icons/icon128.png"},
-  permissions:["identity","storage","offscreen","downloads","alarms"],
+  permissions:["identity","storage","offscreen","downloads","alarms","sidePanel"],
+  side_panel:{default_path:"center.html"},
   host_permissions:[u.origin+"/*","https://chatgpt.com/*"],
   background:{service_worker:"background.js"},
   web_accessible_resources:[{resources:["frame.html"],matches:["https://chatgpt.com/*"],use_dynamic_url:true}],
-  content_scripts:[{matches:["https://chatgpt.com/*"],js:["locales/en.js","locales/zh_CN.js","i18n.js","fast-text.js","progress.js","source-file.js","visible.js","glyphs.js","routes.js","page-index.js","overlay.js","source-control.js","append-picker.js","workspace.js","capture.js"]}],
+  content_scripts:[{matches:["https://chatgpt.com/*"],js:["locales/en.js","locales/zh_CN.js","i18n.js","fast-text.js","source-dom.js","progress.js","progress-view.js","source-file.js","visible.js","glyphs.js","routes.js","surface-state.js","page-index.js","outline-tree.js","overlay.js","source-control.js","append-picker.js","workspace.js","capture.js"]}],
   content_security_policy:{extension_pages:"script-src 'self'; object-src 'none'; base-uri 'none'; connect-src 'self' "+u.origin},
   incognito:"not_allowed"
 },null,2));

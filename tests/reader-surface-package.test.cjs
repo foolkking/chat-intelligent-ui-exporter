@@ -1,14 +1,16 @@
 const test=require("node:test"),assert=require("node:assert/strict"),fs=require("node:fs"),path=require("node:path"),os=require("node:os"),cp=require("node:child_process");
-test("floating Reader package keeps its ID, has all sizes of its own icon and no native side-panel surface",()=>{
+test("Reader keeps its ID, ChatGPT-only injection and a private native import surface for other webpages",()=>{
   const task=fs.mkdtempSync(path.join(os.tmpdir(),"reader-surface-contract-")),out=path.join(task,"extension");
   const built=cp.spawnSync(process.execPath,[path.join(__dirname,"../scripts/package-reader.cjs"),"https://reader.example.test",out],{encoding:"utf8"});
   assert.equal(built.status,0,built.stderr);const m=JSON.parse(fs.readFileSync(path.join(out,"manifest.json")));
-  assert.ok(!m.permissions.includes("sidePanel"));assert.equal(m.side_panel,undefined);
+  assert.ok(m.permissions.includes("sidePanel"));assert.deepEqual(m.side_panel,{default_path:"center.html"});
   assert.deepEqual(m.web_accessible_resources,[{resources:["frame.html"],matches:["https://chatgpt.com/*"],use_dynamic_url:true}]);
   assert.deepEqual(m.content_scripts[0].matches,["https://chatgpt.com/*"]);
   const scripts=m.content_scripts[0].js;
   assert.ok(scripts.indexOf("routes.js")>=0&&scripts.indexOf("routes.js")<scripts.indexOf("workspace.js"));
   assert.ok(scripts.indexOf("workspace.js")<scripts.indexOf("capture.js"));
+  assert.ok(scripts.indexOf("surface-state.js")>=0&&scripts.indexOf("surface-state.js")<scripts.indexOf("overlay.js"));
+  assert.ok(scripts.indexOf("outline-tree.js")>scripts.indexOf("page-index.js")&&scripts.indexOf("outline-tree.js")<scripts.indexOf("overlay.js"));
   assert.equal(m.version,"0.3.0");
   for(const name of ["center.html","center.css","center.js","center-selection.js","batch-model.js","zip-source.js","archive-source.js","workspace.js","batch-worker.js","i18n.js","fast-text.js"])
     assert.ok(fs.existsSync(path.join(out,name)),"Unpackaged import-center dependency: "+name);

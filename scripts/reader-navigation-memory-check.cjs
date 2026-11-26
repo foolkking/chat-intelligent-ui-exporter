@@ -17,7 +17,7 @@ try{
   }
   fs.writeSync(fd,"}}");
 }finally{fs.closeSync(fd);}
-const files=["extension/locales/en.js","extension/i18n.js","extension/fast-text.js","reader/visible.js","reader/source-file.js","reader/page-index.js"];
+const files=["extension/locales/en.js","extension/i18n.js","extension/fast-text.js","extension/source-dom.js","reader/visible.js","reader/source-file.js","reader/page-index.js"];
 const result={at:new Date().toISOString(),kind:"real Edge + synthetic local 50001-message Blob; not live ChatGPT",sourceBytes:fs.statSync(file).size,
   files:Object.fromEntries(files.map(n=>[n,crypto.createHash("sha256").update(fs.readFileSync(path.join(repo,n))).digest("hex")])),heaps:{},checks:[]};
 const server=http.createServer((req,res)=>{

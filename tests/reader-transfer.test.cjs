@@ -327,7 +327,8 @@ test("source control shares real PageIndex semantics: virtual history keeps prog
       return backend.matchAttempt ? {state: message.attempt === "attempt-1" ? "saved" : "previous"} : backend;
     }}};
   try {
-    for (const file of ["glyphs.js", "progress.js", "page-index.js", "source-control.js"])
+    w.eval(fs.readFileSync(path.join(__dirname, "../extension/source-dom.js"),"utf8"));
+    for (const file of ["glyphs.js", "progress.js", "progress-view.js", "page-index.js", "source-control.js"])
       w.eval(fs.readFileSync(path.join(__dirname, "../reader", file), "utf8"));
     w.ReaderSourceControl({pathId: () => "synthetic", cancel() {},
       capture(start, excerpt, batch, progress) {

@@ -1,0 +1,411 @@
+{
+  "recordedAt": "2026-11-27T09:23:17.944Z",
+  "timezone": "Asia/Shanghai",
+  "node": "v24.22.3",
+  "branch": "codex/plugin-launcher-navigation",
+  "sourceCommit": "f1482530f85a9cc7138704beec169836725feab5",
+  "baseCommit": "793a8724d440ab66d5f7a095e3c833b897df787e",
+  "provenance": "Local source/package verification only. Not a GitHub CI or real-browser acceptance receipt.",
+  "previousInstallation": {
+    "version": "0.3.1",
+    "files": 59,
+    "zipSha256": "26290ecd604bd2534e66c0ffe2e17dc81f8f5f6beececc99a2a8cfa664f4d4cf",
+    "desktopReadbackIdentical": true
+  },
+  "candidate": {
+    "version": "0.3.2",
+    "files": 60,
+    "installSha256": "719bcb7932c1e7a60ac47ad3aa7f9e5e893104d8866cb881eb144a26a90654f3",
+    "referenceSha256": "9e3444ba30bcdfcd648df82e6e339c6c9cd2f842c4ac4655745a88e3aaadc7da",
+    "bytes": 232607,
+    "referenceKind": "LOCAL_BUILD_NOT_CI",
+    "twoNeutralZipsIdentical": true,
+    "instanceZipAndDirectoryIdentical": true,
+    "manifestOnlyVersionAndLauncherScriptChanged": true,
+    "configIdentical": true,
+    "installed": false,
+    "ciRun": null,
+    "browserAcceptance": false,
+    "serverDeployment": false
+  },
+  "logs": [
+    {
+      "file": "regression-red-01.log",
+      "sha256": "c68c783f9c4ba4fb494e7112488d57eabb8024fa004268b91e1e82e34c2c83cb",
+      "modifiedUtc": "2026-11-27T08:49:02.460Z",
+      "exitCode": 1,
+      "counts": {
+        "tests": 5,
+        "pass": 0,
+        "fail": 5,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      }
+    },
+    {
+      "file": "focused-01.log",
+      "sha256": "5482b5bfda32192c014d4d28b8685429946dcc2038a14d3dcd1c7117533319b3",
+      "modifiedUtc": "2026-11-27T08:51:55.502Z",
+      "exitCode": 0,
+      "counts": {
+        "tests": 63,
+        "pass": 63,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      }
+    },
+    {
+      "file": "focused-02.log",
+      "sha256": "d5ea1ac1e85cfbc7e4606b156a96c8c779e5ec9b0c990fad6f4b8a6025ddf7ef",
+      "modifiedUtc": "2026-11-27T08:54:36.749Z",
+      "exitCode": 1,
+      "counts": {
+        "tests": 14,
+        "pass": 5,
+        "fail": 9,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      }
+    },
+    {
+      "file": "focused-03.log",
+      "sha256": "fe0630fb9aba33a03286afc72c11e8d612f5bbf4d2b84b91114bc6d04093ac0f",
+      "modifiedUtc": "2026-11-27T08:58:33.605Z",
+      "exitCode": 1,
+      "counts": {
+        "tests": 14,
+        "pass": 13,
+        "fail": 1,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      }
+    },
+    {
+      "file": "focused-04.log",
+      "sha256": "8203994182dc1389e790638f47c87e3e19ce059ebdb505708e8c11578b36eae7",
+      "modifiedUtc": "2026-11-27T08:59:11.019Z",
+      "exitCode": 0,
+      "counts": {
+        "tests": 14,
+        "pass": 14,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      }
+    },
+    {
+      "file": "focused-05.log",
+      "sha256": "a108149cf74e9b0b9579cd9af00b1b805704f457ff4e26d32c26d7bdc1e3b9ea",
+      "modifiedUtc": "2026-11-27T09:05:43.770Z",
+      "exitCode": 0,
+      "counts": {
+        "tests": 24,
+        "pass": 24,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0,
+        "todo": 0
+      }
+    },
+    {
+      "file": "full-01.log",
+      "sha256": "03b936edf89c78dc1429e5fc6aee081c21228c4408d9c2f472aabaabe7ce89e5",
+      "modifiedUtc": "2026-11-27T09:01:42.798Z",
+      "exitCode": 0,
+      "counts": {
+        "tests": 496,
+        "pass": 433,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 63,
+        "todo": 0
+      }
+    },
+    {
+      "file": "full-02.log",
+      "sha256": "78b14bb3ce35e41da8e86f81e13f641c7290d16a0ea1f593d9175172c229866d",
+      "modifiedUtc": "2026-11-27T09:09:45.444Z",
+      "exitCode": 0,
+      "counts": {
+        "tests": 498,
+        "pass": 435,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 63,
+        "todo": 0
+      }
+    }
+  ],
+  "measurements": [
+    {
+      "file": "before-031.json",
+      "sha256": "ae0c79f469180f0d19587b9343aaa32b821912adb2c46839f8ee1669a31b7c6e",
+      "result": {
+        "type": "synthetic JSDOM, stored numbers only",
+        "version": "0.3.1",
+        "start": "2026-11-27T08:40:34.185Z",
+        "questions": 128,
+        "mounted": 8,
+        "messages": 256,
+        "sourceBytes": 106791,
+        "requests": 2,
+        "samples": 521,
+        "styleCalls": 122310,
+        "elapsedMs": 9817,
+        "maxTimerGapMs": 172,
+        "phases": [
+          {
+            "stage": "source",
+            "atMs": 126
+          },
+          {
+            "stage": "index",
+            "atMs": 133
+          }
+        ],
+        "rows": 256,
+        "complete": true
+      }
+    },
+    {
+      "file": "after-032-first.json",
+      "sha256": "e884cca9e6e6502f0ed3a4137ed5d694534ff194de28d345da3a9e5a56ddb963",
+      "result": {
+        "type": "synthetic JSDOM, stored numbers only",
+        "version": "0.3.2",
+        "start": "2026-11-27T08:51:52.526Z",
+        "questions": 128,
+        "mounted": 8,
+        "messages": 256,
+        "sourceBytes": 106791,
+        "requests": 2,
+        "samples": 5,
+        "styleCalls": 1402,
+        "elapsedMs": 483,
+        "maxTimerGapMs": 277,
+        "phases": [
+          {
+            "stage": "source",
+            "atMs": 131
+          },
+          {
+            "stage": "index",
+            "atMs": 275
+          },
+          {
+            "stage": "messages",
+            "atMs": 368
+          }
+        ],
+        "rows": 256,
+        "complete": true
+      }
+    },
+    {
+      "file": "before-031-repeat-1.json",
+      "sha256": "ec6a15b7ea7f5cc1295fe46c3f6e303774fe4c07a1cd8f756c93fc4a7ce09674",
+      "result": {
+        "type": "synthetic JSDOM, stored numbers only",
+        "version": "0.3.1",
+        "start": "2026-11-27T09:11:31.176Z",
+        "questions": 128,
+        "mounted": 8,
+        "messages": 256,
+        "sourceBytes": 106791,
+        "requests": 2,
+        "samples": 521,
+        "styleCalls": 122310,
+        "elapsedMs": 8980,
+        "maxTimerGapMs": 173,
+        "phases": [
+          {
+            "stage": "source",
+            "atMs": 132
+          },
+          {
+            "stage": "index",
+            "atMs": 136
+          }
+        ],
+        "rows": 256,
+        "complete": true
+      }
+    },
+    {
+      "file": "after-032-repeat-1.json",
+      "sha256": "4422a5a6c016326b1ed63a1ca55179b8585911d084627d7c8f83ace1afc948a8",
+      "result": {
+        "type": "synthetic JSDOM, stored numbers only",
+        "version": "0.3.2",
+        "start": "2026-11-27T09:11:40.890Z",
+        "questions": 128,
+        "mounted": 8,
+        "messages": 256,
+        "sourceBytes": 106791,
+        "requests": 2,
+        "samples": 5,
+        "styleCalls": 1402,
+        "elapsedMs": 240,
+        "maxTimerGapMs": 127,
+        "phases": [
+          {
+            "stage": "source",
+            "atMs": 80
+          },
+          {
+            "stage": "index",
+            "atMs": 126
+          },
+          {
+            "stage": "messages",
+            "atMs": 177
+          }
+        ],
+        "rows": 256,
+        "complete": true
+      }
+    },
+    {
+      "file": "before-031-repeat-2.json",
+      "sha256": "615b2a482f825735de2b2e654546294e2a1e611c9279e133ff4971606b88d9bb",
+      "result": {
+        "type": "synthetic JSDOM, stored numbers only",
+        "version": "0.3.1",
+        "start": "2026-11-27T09:11:41.711Z",
+        "questions": 128,
+        "mounted": 8,
+        "messages": 256,
+        "sourceBytes": 106791,
+        "requests": 2,
+        "samples": 521,
+        "styleCalls": 122310,
+        "elapsedMs": 8827,
+        "maxTimerGapMs": 160,
+        "phases": [
+          {
+            "stage": "source",
+            "atMs": 119
+          },
+          {
+            "stage": "index",
+            "atMs": 123
+          }
+        ],
+        "rows": 256,
+        "complete": true
+      }
+    },
+    {
+      "file": "after-032-repeat-2.json",
+      "sha256": "cb728fd65f26c176f519da3fcd4a89a8afa483382170d4552ac53d4e5460064a",
+      "result": {
+        "type": "synthetic JSDOM, stored numbers only",
+        "version": "0.3.2",
+        "start": "2026-11-27T09:11:51.183Z",
+        "questions": 128,
+        "mounted": 8,
+        "messages": 256,
+        "sourceBytes": 106791,
+        "requests": 2,
+        "samples": 5,
+        "styleCalls": 1402,
+        "elapsedMs": 244,
+        "maxTimerGapMs": 125,
+        "phases": [
+          {
+            "stage": "source",
+            "atMs": 76
+          },
+          {
+            "stage": "index",
+            "atMs": 124
+          },
+          {
+            "stage": "messages",
+            "atMs": 173
+          }
+        ],
+        "rows": 256,
+        "complete": true
+      }
+    },
+    {
+      "file": "before-031-repeat-3.json",
+      "sha256": "29a4e283223b89663047636cba0b5027dc3274800621f68a5d68b6cfeb79de12",
+      "result": {
+        "type": "synthetic JSDOM, stored numbers only",
+        "version": "0.3.1",
+        "start": "2026-11-27T09:11:52.043Z",
+        "questions": 128,
+        "mounted": 8,
+        "messages": 256,
+        "sourceBytes": 106791,
+        "requests": 2,
+        "samples": 521,
+        "styleCalls": 122310,
+        "elapsedMs": 9059,
+        "maxTimerGapMs": 168,
+        "phases": [
+          {
+            "stage": "source",
+            "atMs": 128
+          },
+          {
+            "stage": "index",
+            "atMs": 132
+          }
+        ],
+        "rows": 256,
+        "complete": true
+      }
+    },
+    {
+      "file": "after-032-repeat-3.json",
+      "sha256": "1ccbea34d34b04ac8a1d1c01105c01b57829eef691e19fcf9e1d5e4579e50bbd",
+      "result": {
+        "type": "synthetic JSDOM, stored numbers only",
+        "version": "0.3.2",
+        "start": "2026-11-27T09:12:01.716Z",
+        "questions": 128,
+        "mounted": 8,
+        "messages": 256,
+        "sourceBytes": 106791,
+        "requests": 2,
+        "samples": 5,
+        "styleCalls": 1402,
+        "elapsedMs": 251,
+        "maxTimerGapMs": 133,
+        "phases": [
+          {
+            "stage": "source",
+            "atMs": 85
+          },
+          {
+            "stage": "index",
+            "atMs": 132
+          },
+          {
+            "stage": "messages",
+            "atMs": 188
+          }
+        ],
+        "rows": 256,
+        "complete": true
+      }
+    }
+  ],
+  "limitations": [
+    "No real ChatGPT/browser performance, screenshot or final committed import receipt.",
+    "Four-round chapter window and lightweight body conversion not implemented.",
+    "The synthetic reader callback diagnostic excludes initial workspace DOM and rendering.",
+    "First candidate measurement worsened maximum timer gap; all measurements retained.",
+    "63 existing skips retained; no new skipped gate.",
+    "Full-02 ran before commit; final exact-revision run is recorded separately."
+  ]
+}

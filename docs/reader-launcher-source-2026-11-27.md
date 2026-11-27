@@ -34,7 +34,12 @@ node scripts/package-reader.cjs https://reader.example.test <NEW_DIRECTORY> --zi
 node scripts/navigation-read-check.cjs <PACKAGED_DIRECTORY> <NEW_RESULT_JSON>
 ```
 
-完整套件第二轮：**498 注册 / 435 通过 / 0 失败 / 63 原有跳过 / 0 取消**，exit 0。新增 11 项，无新增 skip、无阈值放宽。真实 fixture 不在本机的原有 skip 和 JSDOM 浏览器能力告警仍保留。精确源码、包及日志校验值见配套数字证据；提交后的运行不能由此表中较早的结果替代。
+完整套件第二轮：**498 注册 / 435 通过 / 0 失败 / 63 原有跳过 / 0 取消**，exit 0。新增 11 项，无新增 skip、无阈值放宽。真实 fixture 不在本机的原有 skip 和 JSDOM 浏览器能力告警仍保留。精确源码、包及日志校验值见[配套数字证据](evidence/plugin-launcher-source-2026-11-27.json)；提交后的运行不能由此表中较早的结果替代。
+
+- 源码提交：`f1482530f85a9cc7138704beec169836725feab5`。本记录后续提交仅补本地证据，不改变产品代码。
+- 候选实例 ZIP：232,607 字节，60 个文件，SHA-256 `719bcb7932c1e7a60ac47ad3aa7f9e5e893104d8866cb881eb144a26a90654f3`。
+- 两次本地中性包 SHA-256 均为 `9e3444ba30bcdfcd648df82e6e339c6c9cd2f842c4ac4655745a88e3aaadc7da`；实例只改变打包器规定的 origin 位置，中性化后完全一致。**这是 LOCAL_BUILD_NOT_CI，不是独立 Actions 参考证据**。
+- 旧桌面 59 文件再次逐项比对旧 ZIP 完全相同；候选目录与新 ZIP 的 60 文件逐项一致。新包与旧包的 manifest 除版本和 `launcher.js` 内容脚本外完全相同，实例配置字节相同。
 
 128 个合成问答轮次 / 256 消息 / 8 个已挂载 DOM / 106,791 来源字节 / 2 请求，逐项校验结果 ID 与顺序、完整标记：
 

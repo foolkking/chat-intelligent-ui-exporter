@@ -1,5 +1,7 @@
 # 插件局部整改与长对话改前基线（2026-11-27）
 
+本文保留 0.3.1 候选形成时的历史状态；之后的安装及 0.3.2 窄范围修复见 [Reader 当前入口](../reader/README.md) 和[后续修复记录](reader-launcher-source-2026-11-27.md)。下文未发布状态不是最新安装事实，四轮章节未实施的限制仍有效。
+
 ## 范围与当前状态
 
 仅插件仓库，分支 `codex/plugin-local-chapter-index`。未修改 Reader Web、API、worker、数据库迁移或生产部署。原工作目录及两个未接入的 `local-*` 草稿保留；本轮使用独立 worktree。

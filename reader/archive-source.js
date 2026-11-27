@@ -23,8 +23,8 @@ globalThis.ReaderLocalArchive=(()=>{
     }
     const rows=[],ids=new Set(),names=new Map(),projectGroups=new Set();
     function claim(group,value,claims=names){
-      const name=typeof value==="string"?value.trim():"";
-      if(!name||name===group.slice(8))return;
+      const name=ReaderRoutes.projectName(value,group.slice(8));
+      if(!name)return;
       if(!claims.has(group))claims.set(group,name);
       else if(claims.get(group)!==name)claims.set(group,null);
     }
@@ -125,7 +125,10 @@ globalThis.ReaderLocalArchive=(()=>{
         const archive=await writer.finish(assets,progress);return {file:archive,sha256:meta.zipDigest,partial:meta.partial,losses};
       }catch(e){await writer.abort();throw e;}
     }
-    return {digest,rows,groups:Object.fromEntries([...names].filter(([,name])=>name)),build,complete:true};
+    const evidence={};
+    for(const group of projectGroups)evidence[group]=names.get(group)?{source:"export-metadata",confidence:"explicit"}:
+      {source:names.has(group)?"conflict":"missing",confidence:"none"};
+    return {digest,rows,groups:Object.fromEntries([...names].filter(([,name])=>name)),evidence,build,complete:true};
   }
   return {open,fingerprint};
 })();

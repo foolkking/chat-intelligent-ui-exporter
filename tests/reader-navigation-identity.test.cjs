@@ -52,7 +52,10 @@ test("sections retain actual heading parents and repeated occurrences without ch
     const row=f.index.fromBranch({messages:[{id:"a",role:"assistant",body:"# Top\n### Child\n### Child\n## Sibling\n# End"}]})[0];
     const sections=JSON.parse(JSON.stringify(f.index.sections(row)));
     assert.deepEqual(sections.map(s=>[s.index,s.level,s.parent,s.occurrence]),[[0,1,null,0],[1,3,0,0],[2,3,0,1],[3,2,0,0],[4,1,null,0]]);
-    assert.deepEqual(sections.map(s=>s.target),Array.from(row.headings,(_,heading)=>({id:"a",heading})));
+    const parents=[[],["Top"],["Top"],["Top"],[]];
+    assert.deepEqual(sections.map(s=>s.target),Array.from(row.headings,(h,heading)=>({id:"a",heading,conversation:"synthetic-identities",
+      chapter:{text:h.text,level:h.level,occurrence:heading===2?1:0,parents:parents[heading],ancestry:parents[heading].map(p=>[1,p,0]),
+        before:row.headings[heading-1]?.text??null,after:row.headings[heading+1]?.text??null}})));
     assert.deepEqual(Object.keys(row.headings[0]).sort(),["level","text"]);
     const metadata=f.index.metadata(row);assert.deepEqual(JSON.parse(JSON.stringify(metadata.sections)),sections);
     assert.ok(!("body" in metadata));
@@ -65,7 +68,8 @@ test("tree preserves leading answers, consecutive questions and distinct same-ti
     const tree=JSON.parse(JSON.stringify(f.index.tree(rows)));
     assert.deepEqual(tree.map(t=>[t.q?.id||null,t.answers.map(a=>a.id)]),[[null,["a0"]],["q1",[]],["q2",["a2","a3"]]]);
     assert.ok(tree.flatMap(t=>[t.q,...t.answers].filter(Boolean)).every(r=>!("body"in r)&&r.title.length<=220&&r.sections.length===1));
-    assert.deepEqual(tree[2].answers.map(a=>a.sections[0].target),[{id:"a2",heading:0},{id:"a3",heading:0}]);
+    assert.deepEqual(tree[2].answers.map(a=>a.sections[0].target),["a2","a3"].map(id=>({id,heading:0,conversation:"synthetic-identities",
+      chapter:{text:"Repeated",level:2,occurrence:0,parents:[],ancestry:[],before:null,after:null}})));
   }finally{f.close();}
 });
 test("hidden previous markdown and zero-opacity history cannot supply a destination or branch identity",()=>{

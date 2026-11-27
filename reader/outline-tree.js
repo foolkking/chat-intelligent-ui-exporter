@@ -48,7 +48,7 @@ globalThis.ReaderChapterWindow=({rows,load,valid,patch,error})=>{
       const updates=new Map();
       for(const key of cache.keys())if(!allowed.has(owner.get(key))){cache.delete(key);updates.set(key,null);}
       for(const key of cache.keys())refresh(key,updates);
-      patch(updates,{open:first(center).id,close:first(old<0?0:old)?.id});
+      patch(updates,{open:first(center).id,close:first(old<0?0:old)?.id,allowed:Array.from(allowed,i=>first(i).id)});
     }
     return request(id);
   }
@@ -91,6 +91,7 @@ globalThis.ReaderOutlineTree = ({container,zh=false,onLocate=()=>{},onPreview=()
   let nodes=new Map(),roots=[],visible=[],positions=new Map(),offsets=[0],expanded=new Map(),heights=new Map();
   let activeKey=null,focusKey=null,dead=false,scheduled=0,rendered=[],windowStart=-1,version=0,renderedVersion=-1;
   const renderedNode=new WeakMap();
+  let localTurns=false,windowTurns=new Map();
   const targetKey=target=>!target?.id?null:JSON.stringify(target.heading===undefined?["message",target.id]:["section",target.id,target.heading]);
   const isOpen=node=>node.children.length&&expanded.get(node.key)!==false;
   const owns=()=>root.parentElement===container;
@@ -170,7 +171,8 @@ globalThis.ReaderOutlineTree = ({container,zh=false,onLocate=()=>{},onPreview=()
     if(next)show(next.key,true);
   }
   function rowElement(node){
-    const row=make("div","outline-row"),button=make("button","outline-node"+(node.kind==="question"?" entry":""));
+    const preview=node.kind==="question"?node.row:localTurns&&node.kind==="turn"?node.turn?.q:null;
+    const row=make("div","outline-row"),button=make("button","outline-node"+(preview?" entry":""));
     row.dataset.treeRow=node.key;row.dataset.kind=node.kind;row.setAttribute("role","none");
     row.style.setProperty("--indent",Math.min(48,(node.level-1)*12)+"px");
     button.type="button";button.setAttribute("role","treeitem");button.setAttribute("aria-level",String(node.level));
@@ -187,7 +189,7 @@ globalThis.ReaderOutlineTree = ({container,zh=false,onLocate=()=>{},onPreview=()
     button.onfocus=()=>{focusKey=node.key;mark();};
     button.onclick=e=>{if(live()&&e.isTrusted){e.stopPropagation();focusKey=node.key;mark();onLocate({...node.target},button);}};
     button.onkeydown=e=>{if(live())keydown(e,node);};
-    if(node.kind==="question")onPreview(node.row,button,row);
+    if(preview)onPreview(preview,button,row);
     observer?.observe(row);renderedNode.set(button,node);return button;
   }
   function render(){
@@ -243,13 +245,35 @@ globalThis.ReaderOutlineTree = ({container,zh=false,onLocate=()=>{},onPreview=()
     }
     for(const node of [parent,...added])node.children.forEach((child,i)=>{child.position=i+1;child.siblings=node.children.length;});
   }
+  function addMessages(root,turn){
+    if(turn.q)add(targetKey({id:turn.q.id}),"question",{id:turn.q.id},L("提问","Question")+" · "+turn.q.title,root,turn.q);
+    turn.answers.forEach((answer,i)=>{
+      const parent=add(targetKey({id:answer.id}),"answer",{id:answer.id},L(`回答 ${i+1}`,`Answer ${i+1}`),root);
+      if(answer.sections?.length)addSections(parent,answer.sections);
+    });
+    root.children.forEach((n,i)=>{n.position=i+1;n.siblings=root.children.length;});
+  }
+  function dropChildren(parent){
+    const stack=parent.children.splice(0);
+    while(stack.length){const old=stack.pop();stack.push(...old.children);nodes.delete(old.key);heights.delete(old.key);expanded.delete(old.key);}
+  }
   function patchChapters(updates,window){
     if(dead)return;
+    if(localTurns&&window?.allowed){
+      const allowed=new Set(window.allowed);
+      for(const [id,root] of windowTurns)if(!allowed.has(id)){
+        dropChildren(root);expanded.delete(root.key);windowTurns.delete(id);
+        if(!nodes.has(activeKey))activeKey=null;if(!nodes.has(focusKey))focusKey=root.key;
+      }
+      for(const id of allowed)if(!windowTurns.has(id)){
+        const root=nodes.get(JSON.stringify(["turn",id]));if(!root)continue;
+        addMessages(root,root.turn);expanded.set(root.key,id===window.open);windowTurns.set(id,root);
+      }
+    }
     for(const [id,detail] of updates){
       const parent=nodes.get(targetKey({id}));if(!parent)continue;
       const active=nodes.get(activeKey),focus=nodes.get(focusKey);
-      const stack=parent.children.splice(0);
-      while(stack.length){const old=stack.pop();stack.push(...old.children);nodes.delete(old.key);heights.delete(old.key);expanded.delete(old.key);}
+      dropChildren(parent);
       if(detail)addSections(parent,detail.sections);
       // A reused ordinal may now name another chapter. Preserve the owning
       // answer until its actual current heading has been re-verified.
@@ -262,19 +286,15 @@ globalThis.ReaderOutlineTree = ({container,zh=false,onLocate=()=>{},onPreview=()
     }
     if(updates.size||window){flatten();if(owns())render();}
   }
-  function setRows(rows,turns=ReaderPageIndex.tree(rows)){
+  function setRows(rows,turns=ReaderPageIndex.tree(rows),{windowed=false}={}){
     if(dead)return;
-    const priorFocus=focusedKey();nodes=new Map();roots=[];version++;
+    const priorFocus=focusedKey();nodes=new Map();roots=[];version++;localTurns=windowed;windowTurns.clear();
     turns.forEach((turn,i)=>{
       const first=turn.q||turn.answers[0];if(!first)return;
       const root=add(JSON.stringify(["turn",first.id]),"turn",{id:first.id},
         L(`第 ${i+1} 轮`,`Turn ${i+1}`)+(first.title?" · "+first.title:""),null);
-      if(!expanded.has(root.key))expanded.set(root.key,i===0);
-      if(turn.q)add(targetKey({id:turn.q.id}),"question",{id:turn.q.id},L("提问","Question")+" · "+turn.q.title,root,turn.q);
-      turn.answers.forEach((answer,i)=>{
-        const parent=add(targetKey({id:answer.id}),"answer",{id:answer.id},L(`回答 ${i+1}`,`Answer ${i+1}`),root);
-        if(answer.sections?.length)addSections(parent,answer.sections);
-      });
+      if(!expanded.has(root.key))expanded.set(root.key,!windowed&&i===0);
+      if(windowed)root.turn=turn;else addMessages(root,turn);
     });
     for(const node of nodes.values())node.children.forEach((child,i)=>{child.position=i+1;child.siblings=node.children.length;});
     roots.forEach((node,i)=>{node.position=i+1;node.siblings=roots.length;});

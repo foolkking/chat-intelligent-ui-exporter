@@ -255,7 +255,7 @@
       if(!row)throw Error("Message unavailable");const body=ReaderVisible(row,FastTextExporter).body||"";
       ReaderPageIndex.corroborate(row,body);return body;
     }
-    return {rows,complete:!data.warnings?.length,loadBody,
+    return {rows,branch:data.branch,complete:!data.warnings?.length,loadBody,
       loadChapters:async(id,signal)=>{const body=await loadBody(id,signal);signal?.throwIfAborted();cost.chapterParses++;return ReaderPageIndex.headings(body);},
       loadFiles:async(id,signal)=>{
         signal?.throwIfAborted();verifyVersion();cost.fileReads++;const m=await data.rawMessage(id);

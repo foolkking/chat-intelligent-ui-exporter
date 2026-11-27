@@ -1,7 +1,7 @@
 const test=require("node:test"),assert=require("node:assert/strict"),fs=require("node:fs"),vm=require("node:vm");
 globalThis.fflate=require("../reader/vendor/fflate-0.8.3.js");
 globalThis.FastTextExporter=require("../extension/fast-text.js");
-for(const f of ["sha256","source-file","package","visible","zip-source","archive-source","batch-model"])require("../reader/"+f+".js");
+for(const f of ["routes","sha256","source-file","package","visible","zip-source","archive-source","batch-model"])require("../reader/"+f+".js");
 function folder(){
   const files=new Map();return {files,async getFileHandle(name){return {
     async getFile(){return files.get(name);},async createWritable(){const parts=[];return {

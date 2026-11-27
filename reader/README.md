@@ -1,6 +1,14 @@
 # Chat Reader 浏览器客户端
 
-## 当前插件候选 — 0.3.4，2026-11-27，真实网页验收由用户执行
+## 当前插件候选 — 0.3.5，2026-11-28
+
+基于 `5af53f39d631ae84625a9dc41cbb9d161a724e7c`。已发现的来源项目按稳定身份读取名称：侧栏、项目控件、面包屑、项目首页、明确的导出元数据及同工作区短期缓存。晚到或更名只更新标签，不改变勾选或 Reader 目标。网页目录仍是局部目录；缺证据的项目可以设本地别名。
+
+导航以活动时间线为边界，优先核验已渲染正文；对远端消息，按能力和运行时证据准备原生行，核验失败则退回已知外壳和有界历史搜索。原生轮次键不是消息 ID。章节用父级路径、出现次序和相邻标题区分；落点与阅读高亮共用阅读线。`?message=` 仅供新标签页独立实验，不自动刷新原页。
+
+[用户验收单与脱敏命令](../docs/reader-native-acceptance-2026-11-28.md) · [源码依据、局限与三轮复审](../docs/reader-native-projects-2026-11-28.md)。真实账号、截图和 30+30 次导航由用户验证；没有以本机测试或上一版 CI 判定其通过。本轮不更改 Reader 服务、生产或已有浏览器存储。
+
+## 上一轮 — 0.3.4，2026-11-27
 
 基于 `741fab69f0d062ecba84d685f7cd78d7a2967ff7`，候选分支 `codex/plugin-remote-chapters`。只改插件导航内核及其共享来源适配：先把已核实的回答容器带入渲染范围，再核验正文与章节；全局建立轻量轮次索引，只在当前四轮窗口按需读取章节；保留搜索、附件、完整保存和选择追加的独立路径。详见[整改、三轮审查、测试矩阵与人工验收](../docs/reader-remote-chapters-2026-11-27.md)。
 
@@ -91,7 +99,7 @@
 node scripts/package-reader.cjs https://reader.example.test E:\chat-reader-temp\reader-private-build --zip
 ```
 
-分发时提供绑定实际实例的 `chat-reader-0.3.4.zip` 和 **这个安装包**的 SHA-256，而不是示例域名包。用户无需编译：核对可信交付摘要，解压到长期保留的目录，在 Chrome／Edge 扩展管理开启开发者模式，加载直接含 `manifest.json` 的目录。
+分发时提供绑定实际实例的 `chat-reader-0.3.5.zip` 和 **这个安装包**的 SHA-256，而不是示例域名包。用户无需编译：核对可信交付摘要，解压到长期保留的目录，在 Chrome／Edge 扩展管理开启开发者模式，加载直接含 `manifest.json` 的目录。
 
 稳定内测 ID 仍为 `gihbiofiiflkckcmomddkkjkoifkddfi`，绿色 cr 图标不会改变 ID。更新已有解压安装时，先完成或暂停来源读取，用已核验的新包替换原安装目录的程序文件，再在扩展管理点「重新加载」并刷新 ChatGPT 标签。不要删除扩展的存储或先卸载以清空授权、恢复包和计划；未受理的来源读取关闭后需要重新读取。解压安装不具有商店自动升级机制。
 
@@ -100,7 +108,7 @@ node scripts/package-reader.cjs https://reader.example.test E:\chat-reader-temp\
 ```powershell
 # READER_DISTRIBUTION_ORIGIN 预先从可信部署配置设置；路径为本次新目录和已取得的精确 CI 参考校验文件。
 node scripts/package-reader.cjs $env:READER_DISTRIBUTION_ORIGIN "$T\extension" --zip
-node scripts/verify-reader-distribution.cjs "$T\chat-reader-0.3.4.zip" "$R\chat-reader-0.3.4.zip.sha256"
+node scripts/verify-reader-distribution.cjs "$T\chat-reader-0.3.5.zip" "$R\chat-reader-0.3.5.zip.sha256"
 ```
 
 核验器检查实际 ZIP 是打包器生成的规范字节、配置、主机权限与 CSP 均绑定该实例，再只把这三处绑定还原到示例地址，要求还原后的**整个 ZIP**与 CI 摘要相同。可执行代码、权限、图标或许可文件不符均拒绝。不要用安装包旁自生成的摘要代替 CI 的参考摘要；两个不同地址的 ZIP 摘要本来就不同。只有明确配置 `READER_PUBLIC_ORIGIN` 的**私有仓库**才另在 Actions 中生成实例包。`--test-only` 仅作本地实验，不用于向用户交付。

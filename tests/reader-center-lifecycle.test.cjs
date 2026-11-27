@@ -538,6 +538,70 @@ async function openWeb(f){
 function groupButton(doc,group){return [...doc.querySelectorAll("#project-groups button[data-group]")].find(n=>n.dataset.group===group);}
 const stepButton=(doc,n)=>doc.querySelector(`#steps button[data-step="${n}"]`);
 function checkRow(doc,index=0){doc.querySelectorAll("#source-rows input")[index].click();}
+test("late names patch the same checkbox/page/filter/scroll and selected Reader destination, without a plan mutation",async()=>{
+  const web=webSource(undefined,{groups:{},namesRevision:0,evidence:{"project:p1":{source:"missing"}}});
+  const f=await fixture({plan:null,web,tabs:[{id:17,title:"Synthetic source"}],projects:[{id:projectA,name:"Manual target"}]});
+  try{
+    const doc=f.w.document;Object.defineProperty(doc,"visibilityState",{value:"visible",configurable:true});
+    let wanted="Discovered",rev=0,callbacks=[];
+    const timer=f.w.setTimeout.bind(f.w);
+    f.w.setTimeout=(cb,ms,...args)=>{if(ms===350||ms===2200){callbacks.push(cb);return -1;}return timer(cb,ms,...args);};
+    const send=f.w.chrome.runtime.sendMessage;f.w.chrome.runtime.sendMessage=async m=>m.kind==="batch-project-names"?
+      {catalog:web.catalog,scope:web.scope,groups:{"project:p1":wanted},evidence:{"project:p1":{source:"project-link"}},namesRevision:++rev}:send(m);
+    await openWeb(f);doc.querySelector("#source-more").click();checkRow(doc);
+    const list=doc.querySelector("#source-rows"),check=list.querySelector("input"),label=list.querySelector("[data-source-label]");
+    check.focus();list.scrollTop=37;const page=doc.querySelector("#source-page-status").textContent;
+    callbacks.pop()();await until(()=>label.textContent==="Discovered");
+    assert.equal(doc.activeElement,check);assert.equal(check.checked,true);assert.equal(check.isConnected,true);assert.equal(list.scrollTop,37);
+    assert.equal(doc.querySelector("#source-page-status").textContent,page);assert.equal(doc.querySelector("#source-group").value,"project:p1");
+    await stepButton(doc,2).onclick();const select=doc.querySelector("#target-mappings select");select.value=projectA;select.onchange();
+    const kept=doc.querySelector("#target-mappings select");kept.focus();wanted="Renamed";callbacks.pop()();
+    await until(()=>doc.querySelector("#target-mappings .mapping-row label").textContent==="Renamed");
+    assert.equal(kept.value,projectA);assert.equal(kept.isConnected,true);assert.equal(doc.activeElement,kept);assert.equal(f.state.batchPlan,null);
+    assert.equal(f.state.batchMappings,undefined);assert.deepEqual(f.state.jobs,[]);
+    assert.doesNotMatch(JSON.stringify(f.w.ReaderProjectReport()),/Discovered|Renamed|project:p|catalog-1/);
+  }finally{f.close();}
+});
+test("a background rename out of a compact project search keeps the active accordion, filter, page and focused checked row",async()=>{
+  const web=webSource(),f=await fixture({plan:null,web,tabs:[{id:17,title:"Synthetic source"}],wide:false});
+  try{
+    const d=f.w.document;Object.defineProperty(d,"visibilityState",{value:"visible",configurable:true});
+    const timer=f.w.setTimeout.bind(f.w),callbacks=[];
+    f.w.setTimeout=(cb,ms,...args)=>{if(ms===350||ms===2200){callbacks.push(cb);return -1;}return timer(cb,ms,...args);};
+    const send=f.w.chrome.runtime.sendMessage;f.w.chrome.runtime.sendMessage=m=>m.kind==="batch-project-names"?
+      Promise.resolve({catalog:web.catalog,scope:web.scope,groups:{...web.groups,"project:p1":"Updated label"},evidence:{},namesRevision:1}):send(m);
+    await openWeb(f);
+    const query=d.querySelector("#project-query");query.value="Same name";query.oninput();
+    const active=groupButton(d,"project:p1"),neighbor=groupButton(d,"project:p0");
+    d.querySelector("#source-more").click();checkRow(d);
+    const list=d.querySelector("#source-rows"),box=list.querySelector("input"),pane=d.querySelector("#conversation-pane");
+    box.focus();list.scrollTop=29;const page=d.querySelector("#source-page-status").textContent;
+    callbacks.pop()();await until(()=>list.querySelector("[data-source-label]").textContent==="Updated label");
+    assert.equal(pane.closest("li").dataset.group,"project:p1");assert.equal(d.querySelector("#source-group").value,"project:p1");
+    assert.equal(groupButton(d,"project:p1"),active);assert.equal(groupButton(d,"project:p0"),neighbor);
+    assert.equal(d.activeElement,box);assert.equal(box.checked,true);assert.equal(list.scrollTop,29);
+    assert.equal(query.value,"Same name");assert.equal(d.querySelector("#source-page-status").textContent,page);
+    assert.equal(f.state.batchPlan,null);
+  }finally{f.close();}
+});
+test("a missing name has a scoped, reversible alias; the alias is not a destination or a server rename",async()=>{
+  const f=await fixture({plan:null,rows:[{id:"a",title:"A",group:"project:p"},{id:"b",title:"B",group:"unclassified"},{id:"c",title:"C",group:"unknown"}]});
+  try{
+    await f.choose([0]);const d=f.w.document;await stepButton(d,1).onclick();
+    const button=groupButton(d,"project:p"),alias=button.parentElement.querySelector(".edit-alias"),dialog=d.querySelector("#project-alias");
+    dialog.showModal=()=>{dialog.open=true;};dialog.close=()=>{dialog.open=false;};
+    alias.click();const field=d.querySelector("#alias-name");field.value="g-p-internal";d.querySelector("#alias-form").dispatchEvent(new f.w.Event("submit",{cancelable:true}));
+    assert.equal(field.validity.customError,true);d.querySelector("#alias-cancel").click();alias.click();
+    assert.equal(field.validity.customError,false);field.value="Reading notes";d.querySelector("#alias-form").dispatchEvent(new f.w.Event("submit",{cancelable:true}));
+    await until(()=>button.textContent.includes("Reading notes"));assert.equal(d.querySelector("#source-rows input").checked,true);
+    assert.equal(f.state["reader-project-alias:archive:same-source"]["project:p"],"Reading notes");
+    assert.notEqual(groupButton(d,"unclassified").querySelector(".project-name").textContent,groupButton(d,"unknown").querySelector(".project-name").textContent);
+    await stepButton(d,2).onclick();assert.equal(d.querySelector(".mapping-row label").textContent,"Reading notes");
+    assert.equal(d.querySelector(".mapping-row select").value,"");assert.equal(f.state.batchPlan,null);
+    await stepButton(d,1).onclick();alias.click();field.value="";d.querySelector("#alias-form").dispatchEvent(new f.w.Event("submit",{cancelable:true}));
+    await until(()=>!button.textContent.includes("Reading notes"));assert.equal(f.state["reader-project-alias:archive:same-source"]["project:p"],undefined);
+  }finally{f.close();}
+});
 test("compact projects collapse separately from selection; expanding to a wide project list retains the exact conversation pane and choice",async()=>{
   const f=await fixture({plan:null,web:webSource(),tabs:[{id:17,title:"Synthetic source"}],wide:false});try{
     const doc=await openWeb(f),button=groupButton(doc,"project:p1"),pane=doc.querySelector("#conversation-pane");

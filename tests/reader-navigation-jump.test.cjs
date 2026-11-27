@@ -459,8 +459,9 @@ test("current section uses the real reading line and retains the duplicate headi
   const f=fixture();try{
     const root=f.root(),msg=f.message(root,"a",0,'<h2 data-offset="0">Repeated</h2><h3 data-offset="300">Child</h3><h2 data-offset="700">Repeated</h2>');
     msg.dataset.height="1500";const row={id:"a",role:"assistant",headings:[{text:"Repeated",level:2},{text:"Child",level:3},{text:"Repeated",level:2}],files:[]};
-    f.verify([row]);root.scrollTop=350;
+    f.verify([row]);root.scrollTop=100;
     assert.deepEqual(JSON.parse(JSON.stringify(f.index.currentSection(row))),{id:"a",heading:1});
+    root.scrollTop=350;assert.deepEqual(JSON.parse(JSON.stringify(f.index.currentSection(row))),{id:"a",heading:2},"Use the lower landing line even while the preceding heading is nearer the viewport top.");
     root.scrollTop=750;assert.deepEqual(JSON.parse(JSON.stringify(f.index.currentSection(row))),{id:"a",heading:2});
     msg.querySelector("h2").remove();
     assert.deepEqual(JSON.parse(JSON.stringify(f.index.currentSection(row))),{id:"a"},"Missing duplicate predecessors cannot shift the requested ordinal.");
@@ -486,5 +487,54 @@ test("only a fresh exact source body can corroborate an otherwise uncertain remo
     f.w.ReaderVisible=m=>({body:m.body});f.w.FastTextExporter={};
     const fresh=f.index.fromBranch({messages:[{...rows[0],body:"Changed source"}]});
     assert.equal((await locate(f,fresh)).ok,true);
+  }finally{f.close();}
+});
+test("native history preparation cannot certify a false reply or silently use geometry in an E2 trial",async()=>{
+  for(const mode of ["native","unavailable","lying","trial-unavailable"]){
+    const f=fixture();try{
+      const root=f.root({size:20000}),rows=f.rows(["first","a"]);f.message(root,"first",30);f.verify(rows);
+      let called=0;const trial=mode==="lying"||mode==="trial-unavailable";
+      root.onMove=()=>{if(!root.querySelector('[data-message-id="a"]'))f.message(root,"a",4500);};
+      const result=await f.index.jump(rows,{id:"a"},new f.w.AbortController().signal,undefined,undefined,{
+        nativeTrial:trial,nativePrepare:async(id,signal)=>{
+          assert.equal(id,"a");assert.equal(signal.aborted,false);called++;
+          if(mode==="native"){f.message(root,"a",4500);return "requested";}
+          return mode==="lying"?"requested":"not-loaded";
+        }});
+      assert.equal(called,1);assert.equal(result.ok,!trial);
+      if(trial){assert.equal(f.scrolls.length,0);assert.notEqual(result.kind,"message");}
+      else {assert.equal(result.kind,"message");assert.equal(result.metrics.strategy,mode==="native"?"native":"history");}
+    }finally{f.close();}
+  }
+});
+test("semantic chapter survives an inserted sibling but never jumps to a relocated parent or another conversation",()=>{
+  const f=fixture();try{
+    const root=f.root(),rows=f.rows(),row=rows[0];
+    row.headings=[{level:2,text:"Parent"},{level:3,text:"Child"}];const target=f.index.sections(row)[1].target;
+    const msg=f.message(root,"a",0,"<h2>Lead</h2><h2>Parent</h2><h3>Child</h3>");
+    row.headings.unshift({level:2,text:"Lead"});
+    assert.equal(f.index.destination(msg,row,target,{fuse:true}).node,msg.lastChild);
+    msg.children[1].textContent="Wrong parent";
+    assert.equal(f.index.destination(msg,row,target,{fuse:true}),null);
+    assert.equal(f.index.destination(msg,row,{...target,conversation:"other"},{fuse:true}),null);
+  }finally{f.close();}
+});
+test("when the only remaining native shell has a non-message key, it can prepare but cannot certify",async()=>{
+  const f=fixture();try{
+    const root=f.root({size:10000}),rows=f.rows(["a","later"]),msg=f.message(root,"a",4100),shell=f.doc.createElement("article");
+    shell.setAttribute("data-turn-key","turn:older");root.append(shell);shell.append(msg);f.message(root,"later",40);
+    f.verify(rows);f.index.sample();msg.remove();
+    shell.getBoundingClientRect=()=>({top:4100-root.scrollTop,bottom:4180-root.scrollTop,left:0,right:500,width:500,height:80});
+    root.onMove=()=>{if(shell.getBoundingClientRect().top<680&&!msg.isConnected)shell.append(msg);};
+    const result=await locate(f,rows);assert.equal(result.ok,true);assert.equal(result.kind,"message");assert.equal(result.metrics.strategy,"shell");
+    assert.equal(result.probes,0);assert.equal(f.source.idOf(shell),undefined);
+  }finally{f.close();}
+});
+test("a fixed overlay covering the landing blocks success even with correct IDs, stable geometry and scrollTop",async()=>{
+  const f=fixture();try{
+    const root=f.root(),rows=f.rows(),msg=f.message(root,"a",1150);f.verify(rows);
+    const modal=f.doc.createElement("aside");f.doc.body.append(modal);
+    f.doc.elementFromPoint=()=>modal;assert.equal((await locate(f,rows)).ok,false);
+    f.doc.elementFromPoint=()=>msg.firstElementChild;assert.equal((await locate(f,rows)).ok,true);
   }finally{f.close();}
 });

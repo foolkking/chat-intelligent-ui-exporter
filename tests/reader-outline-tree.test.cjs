@@ -27,7 +27,8 @@ test("outline tree keeps every turn, question, answer and nested section with st
     assert.deepEqual(items.map(i=>i.dataset.kind),["turn","question","answer","section","section","section","answer"]);
     assert.deepEqual(items.map(i=>Number(i.getAttribute("aria-level"))),[1,2,2,3,4,3,2]);
     assert.ok(f.item({id:"a1"}));assert.ok(f.item({id:"a2"}));
-    f.click(f.item({id:"a1",heading:2}));assert.deepEqual(f.locates[0].target,{id:"a1",heading:2});
+    f.click(f.item({id:"a1",heading:2}));assert.deepEqual(f.locates[0].target,{id:"a1",heading:2,conversation:"synthetic-outline",
+      chapter:{text:"Repeated",level:2,occurrence:1,parents:[],ancestry:[],before:"Child",after:null}});
     assert.equal(f.items().filter(i=>i.tabIndex===0).length,1);
   }finally{f.close();}
 });
@@ -54,7 +55,8 @@ test("roving arrow/Home/End keyboard navigation never jumps until Enter or Space
     const first=f.items()[0];first.focus();f.key(first,"ArrowDown");
     assert.equal(f.w.document.activeElement,f.item({id:"q"}));assert.equal(f.locates.length,0);
     f.key(f.w.document.activeElement,"End");assert.equal(f.w.document.activeElement,f.item({id:"a",heading:0}));
-    f.key(f.w.document.activeElement,"Enter");assert.deepEqual(f.locates.at(-1).target,{id:"a",heading:0});
+    f.key(f.w.document.activeElement,"Enter");assert.deepEqual(f.locates.at(-1).target,{id:"a",heading:0,conversation:"synthetic-outline",
+      chapter:{text:"Section",level:2,occurrence:0,parents:[],ancestry:[],before:null,after:null}});
     f.key(f.w.document.activeElement,"Home");assert.equal(f.w.document.activeElement,f.items()[0]);
     f.key(f.w.document.activeElement," ");assert.deepEqual(f.locates.at(-1).target,{id:"q"});
   }finally{f.close();}

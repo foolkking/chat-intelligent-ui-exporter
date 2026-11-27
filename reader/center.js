@@ -12,6 +12,7 @@
   const projectDrafts=new Map();
   const sourceBindings=new Map(); // live lookup evidence, never an append authorization
   const unnamedGroups=new Map();
+  let aliasNames={},aliasEdit=null,nameTimer,nameRequest=0,nextOwnerCheck=0;
   let activeGroup="",projectPage=0,collapsed=false,sourceRun=0,refreshing=false,sourceBlocked=false,selectedOnly=false;
   const projectNodes=new Map(),wide=matchMedia("(min-width:661px)");
   const root=navigator.storage.getDirectory();
@@ -100,6 +101,7 @@
     b.onclick=()=>work(()=>goStep(i));$("steps").append(b);
   }
   function show(n){step=n;for(const [i,id] of ["source-step","selection-step","target-step","tasks-step"].entries())$(id).hidden=i!==n;
+    nameRequest++;scheduleNames(350);
     $("source-tools").hidden=$("selected-count").hidden=n!==1;
     $("mapping-tools").hidden=n!==2||!device;
     updateSteps();
@@ -121,13 +123,106 @@
   }
   function groupName(g){
     // Presentation only: unknown provenance remains a separate internal group.
-    if(g==="unknown"||g==="unclassified")return L("未分类","Unclassified");
-    const name=ReaderRoutes.projectName(source?.groups?.[g],g.slice(8));
+    if(g==="unknown")return L("项目待确认","Project unconfirmed");
+    if(g==="unclassified")return L("未分类","Unclassified");
+    const name=projectLabel(g);
     if(name)return name;
     if(!unnamedGroups.has(g))unnamedGroups.set(g,unnamedGroups.size+1);
     const n=unnamedGroups.get(g);
     return L(`名称未知的项目 ${n}`,`Unnamed project ${n}`);
   }
+  function projectLabel(g){
+    return ReaderRoutes.projectName(source?.groups?.[g],g.slice(8))||ReaderRoutes.projectName(aliasNames[g],g.slice(8));
+  }
+  function aliasKey(s){return s?.scope?"reader-project-alias:"+s.kind+":"+s.scope:null;}
+  function patchLabels(){
+    if(!source||!selectionModel)return;
+    for(const [g,n] of projectNodes){
+      if(!g)continue;
+      const next=groupName(g);if(n.name!==next){n.name=next;n.label.textContent=next;}
+      const resolved=!!ReaderRoutes.projectName(source.groups?.[g],g.slice(8));
+      if(n.alias){n.alias.hidden=resolved;n.alias.setAttribute("aria-label",L(`为${n.name}设置本地别名`,`Set local alias for ${n.name}`));}
+    }
+    for(const n of $("source-rows").querySelectorAll("[data-source-label]")){
+      const next=groupName(n.dataset.sourceLabel);if(n.textContent!==next)n.textContent=next;
+    }
+    for(const line of $("target-mappings").children){
+      const g=line.dataset.group;
+      if(!ReaderRoutes.groupKey(g))continue;
+      const name=projectLabel(g);
+      line.updateSource(groupName(g),name,name?"":line.sourceSample);
+    }
+    if($("project-query").value.trim()){
+      const scroll=$("project-groups").scrollTop,rowsTop=$("source-rows").scrollTop,focused=document.activeElement,group=focused?.closest("li[data-group]")?.dataset.group;
+      const inProjects=$("project-groups").contains(focused);
+      projectList(true);$("project-groups").scrollTop=scroll;$("source-rows").scrollTop=rowsTop;
+      if(inProjects&&document.activeElement!==focused){
+        (focused.isConnected&&!focused.hidden?focused:projectNodes.get(group)?.button||$("project-query")).focus({preventScroll:true});
+      }
+    }
+    counts();
+  }
+  function editAlias(group){
+    const dialog=$("project-alias"),field=$("alias-name");
+    aliasEdit={source,group};field.value=aliasNames[group]||"";field.setCustomValidity("");
+    if(!dialog.open)dialog.showModal();field.focus();
+  }
+  $("alias-label").textContent=L("本地项目别名","Local project alias");
+  $("alias-save").textContent=L("保存","Save");$("alias-cancel").textContent=L("取消","Cancel");
+  $("alias-cancel").onclick=()=>$("project-alias").close();
+  $("alias-name").oninput=e=>e.target.setCustomValidity("");
+  $("alias-form").onsubmit=e=>{
+    e.preventDefault();const edit=aliasEdit,field=$("alias-name"),value=field.value.trim();
+    if(edit?.source!==source)return;
+    if(value&&!ReaderRoutes.projectName(value,edit.group.slice(8))){field.setCustomValidity(L("请输入项目名称","Enter a project name"));field.reportValidity();return;}
+    void work(async()=>{
+      const key=aliasKey(edit.source);
+      if(key)await navigator.locks.request(key,async()=>{
+        const existing=(await storage.get(key))[key]||{};
+        if(edit.source!==source)return;
+        if(value)existing[edit.group]=value;else delete existing[edit.group];
+        await storage.set({[key]:existing});
+      });
+      if(source!==edit.source)return;
+      if(value)aliasNames[edit.group]=value;else delete aliasNames[edit.group];
+      $("project-alias").close();patchLabels();
+    });
+  };
+  function scheduleNames(ms=2200){
+    clearTimeout(nameTimer);
+    if(source?.kind==="web"&&source.scope&&(step===1||step===2)&&!sourceBlocked)
+      nameTimer=setTimeout(()=>void updateNames(),ms);
+  }
+  async function updateNames(){
+    const selected=source,token=++nameRequest;
+    if(!selected?.catalog||!selected.scope||document.visibilityState==="hidden"){scheduleNames();return;}
+    try{
+      const missing=selected.rows.find(r=>selected.evidence?.[r.group]?.source==="missing")?.group;
+      const recheck=Date.now()>=nextOwnerCheck;
+      const result=await chrome.runtime.sendMessage({kind:"batch-project-names",catalog:selected.catalog,revision:selected.namesRevision,missing,recheck});
+      if(selected!==source||token!==nameRequest||!(step===1||step===2))return;
+      if(result?.error==="source-changed"){
+        sourceBlocked=true;targetsReady=false;$("confirm-import").disabled=true;counts();failure(Error("source-changed"));return;
+      }
+      if(recheck)nextOwnerCheck=Date.now()+60000;
+      if(result?.catalog===selected.catalog&&result.scope===selected.scope&&result.groups){
+        const different=JSON.stringify(selected.groups)!==JSON.stringify(result.groups);
+        Object.assign(selected,{groups:result.groups,evidence:result.evidence,observed:result.observed,namesRevision:result.namesRevision});
+        if(different)patchLabels();
+      }
+    }catch{/* An inactive source tab can become available again. */}
+    finally{if(token===nameRequest)scheduleNames();}
+  }
+  globalThis.ReaderProjectReport=()=>{
+    if(!source)return null;
+    const groups=[...new Set(source.rows.map(r=>r.group).filter(ReaderRoutes.groupKey))];
+    return {kind:source.kind,complete:source.complete===true,verifiedScope:!!source.scope,projects:groups.map((g,i)=>{
+      const sourceName=ReaderRoutes.projectName(source.groups?.[g],g.slice(8)),view=projectNodes.get(g)?.label;
+      return {n:i+1,selectedFilter:g===activeGroup,observed:source.observed?.[g]?.source||source.evidence?.[g]?.source||"missing",
+        resolved:source.evidence?.[g]?.source||"missing",named:!!sourceName,localAlias:!sourceName&&!!aliasNames[g],
+        labelAgrees:view&&step===1?view.textContent===groupName(g):null};
+    })};
+  };
   const selectionOptions=()=>({group:activeGroup,page,selectedOnly});
   function projectLayout(){
     const pane=$("conversation-pane"),review=selectedOnly,key=review?"":activeGroup;
@@ -151,27 +246,48 @@
     selectedOnly=false;$("source-group").disabled=false;
     selection(); // no checkbox or source-read side effects
   }
-  function projectList(){
+  function projectList(namesOnly=false){
     // Both columns and compact accordions reuse one pane; never clone its rows.
-    const pane=$("conversation-pane");document.querySelector(".catalogue-layout").append(pane);
+    const pane=$("conversation-pane"),parent=$("project-groups"),layout=document.querySelector(".catalogue-layout");
+    if(!namesOnly){layout.append(pane);projectNodes.clear();parent.replaceChildren();}
     const summary=selectionModel.summary(),v=selectionModel.groups({page:projectPage,query:$("project-query").value});
-    projectPage=v.page;projectNodes.clear();
+    projectPage=v.page;
     const entries=[{id:"",name:L("全部已发现对话","All discovered conversations"),knownCount:summary.knownCount,selectedCount:summary.selectedCount},...v.groups];
-    $("project-groups").replaceChildren(...entries.map(g=>{
+    // A rename can fall outside the typed query. Keep the user's open compact
+    // row until they change the filter; never show its conversations under "All".
+    const offPage=activeGroup&&!entries.some(g=>g.id===activeGroup)&&summary.groups.find(g=>g.id===activeGroup);
+    if(namesOnly&&!wide.matches&&!selectedOnly&&offPage)entries.push(offPage);
+    if(namesOnly){
+      const keep=new Set(entries.map(g=>g.id));
+      for(const [key,n] of projectNodes)if(!keep.has(key)){
+        if(n.li.contains(pane))layout.append(pane);n.li.remove();projectNodes.delete(key);
+      }
+    }
+    const createRow=g=>{
       const li=el("li"),line=el("div",null,"project-line"),button=el("button"),check=document.createElement("input");
       li.dataset.group=button.dataset.group=g.id;button.type="button";button.setAttribute("aria-controls","conversation-pane");check.type="checkbox";
       const name=el("span",g.name,"project-name"),count=el("span",null,"project-count");button.append(name,count);
       button.onclick=()=>chooseGroup(g.id,true);
       check.onchange=()=>work(()=>{selectionModel.apply(selectionModel.snapshot("filtered",{group:g.id}),{selected:check.checked});selection();});
       const target=el("label",null,"project-select");target.append(check);
-      line.append(button,target);li.append(line);projectNodes.set(g.id,{li,button,check,count,name:g.name});return li;
-    }));
+      let alias;
+      if(ReaderRoutes.groupKey(g.id)){
+        alias=el("button",L("别名","Alias"),"edit-alias");alias.type="button";alias.onclick=()=>editAlias(g.id);
+        alias.setAttribute("aria-label",L(`为${g.name}设置本地别名`,`Set local alias for ${g.name}`));
+        alias.hidden=!!ReaderRoutes.projectName(source.groups?.[g.id],g.id.slice(8));line.append(button,alias,target);
+      }else line.append(button,target);
+      li.append(line);projectNodes.set(g.id,{li,button,check,count,label:name,alias,name:g.name});return li;
+    };
+    let next=parent.firstElementChild;
+    for(const g of entries){
+      const li=projectNodes.get(g.id)?.li||createRow(g);
+      if(li!==next)parent.insertBefore(li,next);
+      next=li.nextElementSibling;
+    }
     // The compact select is a shortcut for this project page, not an unbounded
     // second copy of a large directory. The active off-page choice remains named.
     const choices=[...entries];
-    if(activeGroup&&!choices.some(g=>g.id===activeGroup)){
-      const active=summary.groups.find(g=>g.id===activeGroup);if(active)choices.push(active);
-    }
+    if(offPage&&!choices.includes(offPage))choices.push(offPage);
     $("source-group").replaceChildren(...choices.map(g=>new Option(g.name,g.id)));$("source-group").value=activeGroup;
     $("project-prev").disabled=!v.hasPrevious;$("project-next").disabled=!v.hasNext;
     $("project-prev").parentElement.hidden=v.pages<2;
@@ -193,11 +309,13 @@
         else counts();
       };
       const updated=Number.isFinite(row.update_time)?new Date(row.update_time*1000):row.updatedAt?new Date(row.updatedAt):null;
-      const metadata=[groupName(row.group)];
+      const group=el("span",groupName(row.group));group.dataset.sourceLabel=row.group;
+      const metadata=[];
       if(sourceBindings.get(row.id))metadata.push(L("增量更新","Update existing"));
       if(updated&&!isNaN(+updated))metadata.push(updated.toLocaleDateString());
       if(Number.isSafeInteger(row.attachmentCount)&&row.attachmentCount>=0)metadata.push(L(`附件 ${row.attachmentCount}`,`${row.attachmentCount} files`));
-      copy.append(el("span",row.title,"title"),el("span",metadata.join(" · "),"meta"));label.append(check,copy);li.append(label);return li;
+      const meta=el("span",null,"meta");meta.append(group,...(metadata.length?[" · "+metadata.join(" · ")]:[]));
+      copy.append(el("span",row.title,"title"),meta);label.append(check,copy);li.append(label);return li;
     }));
     $("source-more").hidden=$("source-prev").hidden=v.pages<2;$("source-more").disabled=!v.hasNext;$("source-prev").disabled=!v.hasPrevious;
     $("source-page-status").textContent=L(`${v.from}–${v.to} / ${v.total} 条`,`${v.from}–${v.to} of ${v.total}`);
@@ -222,6 +340,10 @@
   }
   function catalogue(){
     sourceBindings.clear();
+    aliasNames={};aliasEdit=null;if($("project-alias").open)$("project-alias").close();
+    const key=aliasKey(source),snapshot=source;
+    if(key)void storage.get(key).then(saved=>{if(source===snapshot&&saved[key]){aliasNames=saved[key];patchLabels();}}).catch(()=>{});
+    nextOwnerCheck=Date.now()+60000;
     unnamedGroups.clear();
     chosen.clear();page=projectPage=0;collapsed=sourceBlocked=selectedOnly=false;activeGroup="";$("project-query").value="";
     $("refresh-status").textContent="";
@@ -235,6 +357,7 @@
   }
   async function clearSource(){
     sourceBindings.clear();
+    nameRequest++;clearTimeout(nameTimer);aliasNames={};
     readVersion++;sourceRun++;bindingRun++;targetRun++;source=null;selectionModel=null;chosen.clear();mappings={};mappingScope="";
     refreshing=sourceBlocked=false;$("refresh-source").disabled=false;
     if($("bindings-status"))$("bindings-status").textContent="";
@@ -363,7 +486,9 @@
     draft.busy=true;
     try{
       const now=await current();if(!live()||now?.id!==owner.id||now.user!==owner.user)return;
-      const exact=projects.find(p=>p.name===wanted);
+      const matches=projects.filter(p=>p.name===wanted);
+      if(matches.length>1){draft.note=L("有多个同名项目，请从列表选择。","Several projects share that name. Choose from the list.");return;}
+      const exact=matches[0];
       if(exact&&(!draft.result||draft.result===exact.id)){mappings[group]=exact.id;projectDrafts.delete(group);renderTargets(group);return;}
       renderTargets();
       if(webProject){
@@ -395,22 +520,22 @@
     for(const r of source.rows)if(chosen.has(r.id)&&!sourceBindings.get(r.id)&&!samples.has(r.group))samples.set(r.group,r.title);
     const groups=$("target-mode").value==="one"&&samples.size?["*"]:[...samples.keys()];
     $("target-mappings").replaceChildren(...groups.map((g,i)=>{
-      const name=g.startsWith("project:")?ReaderRoutes.projectName(source.groups?.[g],g.slice(8)):"";
+      const name=g.startsWith("project:")?projectLabel(g):"";
       const value=(Object.hasOwn(mappings,g)?mappings[g]:mappings["*"])||"";
       mappings[g]=value;
       const draft=projectDrafts.get(g),line=ReaderProjectRow({id:"mapping-"+i,name,projects,value,draft,webCreate:webProject,L,
         label:g==="*"?L("全部已选对话","All selected conversations"):groupName(g),
         sample:g.startsWith("project:")&&!name?ReaderRoutes.projectName(samples.get(g),g.slice(8)):"",
         selectValue:next=>{if(!targetsReady||!line.isConnected)return;projectDrafts.delete(g);mappings[g]=next;renderTargets(g);},
-        edit:()=>{if(!targetsReady||!line.isConnected)return;projectDrafts.set(g,{name});renderTargets(g,"input");},
+        edit:()=>{if(!targetsReady||!line.isConnected)return;projectDrafts.set(g,{name:g.startsWith("project:")?projectLabel(g):""});renderTargets(g,"input");},
         cancel:()=>{projectDrafts.delete(g);renderTargets(g);},
         submit:()=>confirmProject(g,draft)});
-      line.dataset.group=g;return line;
+      line.dataset.group=g;line.sourceSample=ReaderRoutes.projectName(samples.get(g),g.slice(8));return line;
     }));
     confirmCopy();if(focus)focusMapping(focus,selector);
   }
   function confirmCopy(){
-    $("confirm-import").disabled=!targetsReady||!chosen.size||!!$("target-mappings").querySelector('[data-ready="false"]');
+    $("confirm-import").disabled=sourceBlocked||!targetsReady||!chosen.size||!!$("target-mappings").querySelector('[data-ready="false"]');
     const n=chosen.size,updates=[...chosen].filter(id=>sourceBindings.get(id)).length,checked=[...chosen].filter(id=>sourceBindings.has(id)).length;
     $("confirm-summary").textContent=(checked?L(`${updates} 条已有对应对话，按增量更新检查；${checked-updates} 条未发现已存版本。`,`${updates} existing conversations to check for updates; ${checked-updates} without a saved reference.`):"")+
       L("已保存的对话保留在原项目。","Previously saved conversations keep their project.");
@@ -501,13 +626,14 @@
     submitting=true;$("confirm-import").setAttribute("aria-busy","true");updateSteps();
     try{
     const snapshot=source,epoch=targetRun,revision=mappingRevision,scope=mappingScope,d=await current();
-    const stillConfirmed=()=>step===2&&source===snapshot&&epoch===targetRun&&revision===mappingRevision&&scope===mappingScope&&!$("confirm-import").disabled;
+    const stillConfirmed=()=>!sourceBlocked&&step===2&&source===snapshot&&epoch===targetRun&&revision===mappingRevision&&scope===mappingScope&&!$("confirm-import").disabled;
     if(!stillConfirmed())return;
     if(!d||d.id!==device?.id||d.user!==device.user)throw Error("owner-changed");
     const rows=source.rows.filter(r=>chosen.has(r.id)),fixed={};
     const needsDestination=new Set(rows.filter(r=>!sourceBindings.get(r.id)).map(r=>r.group));
     for(const row of rows)fixed[row.group]=needsDestination.has(row.group)?mappings[$("target-mode").value==="one"?"*":row.group]||null:null;
     const next=ReaderBatch.create({device:d,origin:READER_ORIGIN,source:{kind:source.kind,scope:source.scope,...(source.kind==="web"?{catalog:source.catalog,tab:source.tab}: {})},rows,targets:fixed,attachments:$("include-files").checked});
+    next.projectLabels=Object.fromEntries([...new Set(rows.map(r=>r.group))].filter(ReaderRoutes.groupKey).map(g=>[g,groupName(g)]));
     await navigator.locks.request("reader-batch-plan",async()=>{
       const {device:now,batchPlan:previous,jobs=[]}=await storage.get(["device","batchPlan","jobs"]);
       if(now?.id!==d.id||now.user!==d.user||now.origin!==READER_ORIGIN)throw Error("owner-changed");
@@ -683,7 +809,8 @@
       const old=document.activeElement,key=old?.closest("li")?.dataset.key,action=old?.dataset.action;
       $("task-rows").replaceChildren(...visible.map(item=>{
         const j=byKey.get(item.key),li=el("li"),copy=el("div"),actions=el("div",null,"result-actions");li.dataset.key=item.key;
-        copy.append(el("div",item.title,"title"),el("div",stateCopy(j,item),"meta"));
+        const label=ReaderRoutes.projectName(plan.projectLabels?.[item.group],item.group.slice(8));
+        copy.append(el("div",item.title,"title"),el("div",[label,stateCopy(j,item)].filter(Boolean).join(" · "),"meta"));
         const actual=j?.result?.current_project;
         if(actual)copy.append(el("div",L("实际保存位置：","Saved destination: ")+(actual.state==="project"?
           ReaderRoutes.projectName(actual.name,actual.id)||L("项目名称未知","Project name unavailable"):
@@ -795,7 +922,7 @@
       }
       throw e;
     }finally{
-      if(n===sourceRun){refreshing=false;$("refresh-source").disabled=false;counts();}
+      if(n===sourceRun){refreshing=false;$("refresh-source").disabled=false;counts();scheduleNames();}
     }
   });
   $("restore-web").onclick=()=>work(()=>chooseWeb($("resume-web-tabs"),async result=>{
@@ -810,7 +937,7 @@
       stop=true;ownerChanged=true;if(step===3)work(renderTasks);else if(step===2)work(targets);else if(step===1)counts();}
     if(changes.jobs&&step===3)work(renderTasks);
   });
-  addEventListener("pagehide",()=>{stop=true;sourceRun++;readVersion++;clearInterval(pairTimer);clearInterval(taskTimer);
+  addEventListener("pagehide",()=>{stop=true;sourceRun++;readVersion++;nameRequest++;clearTimeout(nameTimer);clearInterval(pairTimer);clearInterval(taskTimer);
     if(sourceDirName)void root.then(r=>r.removeEntry(sourceDirName,{recursive:true})).catch(()=>{});
   });
   show(0);work(resumeBox);

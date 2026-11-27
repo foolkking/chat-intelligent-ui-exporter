@@ -78,6 +78,9 @@ aside label,#mode-label{display:block;font-size:13px;font-weight:600;margin-bott
 .project-line>button[aria-current=true]{background:var(--wash);color:var(--accent)}
 .project-line>button[aria-expanded]::before{content:"›";font-size:18px;inline-size:12px;flex-shrink:0;text-align:center}
 .project-line>button[aria-expanded=true]::before{transform:rotate(90deg)}
+.project-line>.edit-alias{flex:0 0 auto;color:var(--accent);font-size:12px}
+#project-alias{color:var(--ink);background:var(--paper);border:1px solid var(--rule);border-radius:8px;max-width:calc(100% - 24px)}
+#alias-form{display:grid;gap:8px}#alias-form input{min-height:44px;font:inherit}#alias-form>div{display:flex;justify-content:flex-end}
 .project-pagination{display:flex;align-items:center;justify-content:space-between;gap:4px;flex-shrink:0;border-top:1px solid var(--rule)}
 .project-pagination button{font-size:12px;padding:4px 6px;flex:1}
 #project-page-status{font-size:12px;color:var(--muted);white-space:nowrap}

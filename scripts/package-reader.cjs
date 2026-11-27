@@ -17,7 +17,7 @@ function copyMember(src,dest){
   fs.writeFileSync(dest,text?Buffer.from(b.toString("latin1").replace(/\r\n/g,"\n"),"latin1"):b,{flag:"wx"});
 }
 for (const name of ["background.js","client.js","source-actions.js","source-control.js","append-picker.js","capture.js","glyphs.js","visible.js","package.js","host.js","host.html","transfer-state.js",
-                    "progress.js","progress-view.js","sha256.js","upload.js","source-file.js","routes.js","surface-state.js","surfaces.js","frame.html","frame.js","page-index.js","outline-tree.js","launcher.js","overlay.js",
+                    "progress.js","progress-view.js","sha256.js","upload.js","source-file.js","routes.js","surface-state.js","surfaces.js","frame.html","frame.js","page-index.js","outline-tree.js","launcher.js","overlay.js","native-scroll.js","native-scroll-main.js","site-diagnostics.js",
                     "center.html","center.css","center.js","center-selection.js","center-projects.js","batch-model.js","zip-source.js","archive-source.js","workspace.js","batch-worker.js",
                     "panel.html","panel.js","panel-jobs.js","panel-export.js","panel.css","vendor/fflate-0.8.3.js","vendor/fflate-LICENSE.txt"]){
   copyMember(path.join(root,"reader",name),path.join(out,name));
@@ -33,7 +33,7 @@ const key=fs.readFileSync(path.join(root,"reader/public-key.txt"),"ascii").trim(
 const id=crypto.createHash("sha256").update(Buffer.from(key,"base64")).digest("hex").slice(0,32).replace(/[0-9a-f]/g,c=>String.fromCharCode(97+parseInt(c,16)));
 fs.writeFileSync(path.join(out,"config.js"),`globalThis.READER_ORIGIN=${JSON.stringify(u.origin)};\n`);
 fs.writeFileSync(path.join(out,"manifest.json"),JSON.stringify({
-  manifest_version:3, minimum_chrome_version:"116", name:"Chat Reader", version:"0.3.4", key,
+  manifest_version:3, minimum_chrome_version:"116", name:"Chat Reader", version:"0.3.5", key,
   description:"Browse your Reader library and save the current conversation.",
   action:{default_title:"Chat Reader",default_icon:{"16":"icons/icon16.png","32":"icons/icon32.png"}},icons:{"16":"icons/icon16.png","32":"icons/icon32.png","48":"icons/icon48.png","128":"icons/icon128.png"},
   permissions:["identity","storage","offscreen","downloads","alarms","sidePanel"],
@@ -41,7 +41,8 @@ fs.writeFileSync(path.join(out,"manifest.json"),JSON.stringify({
   host_permissions:[u.origin+"/*","https://chatgpt.com/*"],
   background:{service_worker:"background.js"},
   web_accessible_resources:[{resources:["frame.html"],matches:["https://chatgpt.com/*"],use_dynamic_url:true}],
-  content_scripts:[{matches:["https://chatgpt.com/*"],js:["locales/en.js","locales/zh_CN.js","i18n.js","fast-text.js","source-dom.js","progress.js","progress-view.js","source-file.js","visible.js","glyphs.js","routes.js","surface-state.js","page-index.js","outline-tree.js","launcher.js","overlay.js","source-control.js","append-picker.js","workspace.js","capture.js"]}],
+  content_scripts:[{matches:["https://chatgpt.com/*"],js:["locales/en.js","locales/zh_CN.js","i18n.js","fast-text.js","source-dom.js","progress.js","progress-view.js","source-file.js","visible.js","glyphs.js","routes.js","surface-state.js","page-index.js","outline-tree.js","launcher.js","native-scroll.js","site-diagnostics.js","overlay.js","source-control.js","append-picker.js","workspace.js","capture.js"]},
+    {matches:["https://chatgpt.com/*"],world:"MAIN",js:["native-scroll-main.js"]}],
   content_security_policy:{extension_pages:"script-src 'self'; object-src 'none'; base-uri 'none'; connect-src 'self' "+u.origin},
   incognito:"not_allowed"
 },null,2));

@@ -28,7 +28,8 @@ test("overlay renders the approved tree with all answer entries and marks the ac
     assert.ok(f.root.querySelector('[role="tree"]'));assert.ok(f.item("a"));assert.ok(f.item("b"));
     assert.equal(f.item("a",1).getAttribute("aria-current"),"location");
     assert.ok(f.item("a").classList.contains("current-path"));assert.equal(f.reads.length,0);
-    f.click(f.item("a",2));await tick();assert.deepEqual(f.jumps,[{id:"a",heading:2}]);
+    f.click(f.item("a",2));await tick();assert.deepEqual(f.jumps,[{id:"a",heading:2,conversation:"synthetic-outline-overlay",
+      chapter:{text:"Same",level:2,occurrence:1,parents:[],ancestry:[],before:"Nested",after:null}}]);
   }finally{f.close();}
 });
 test("tree activation reports success only after a verified result and preserves location-unconfirmed failures",async()=>{

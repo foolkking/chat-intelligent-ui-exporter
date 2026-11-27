@@ -12,6 +12,19 @@ async function liveBatch(t){
   const result=await chrome.tabs.sendMessage(t.tab,{kind:"reader-batch-check",path:t.path,nonce:t.nonce,scope:t.scope},{frameId:0}).catch(()=>null);
   return result?.current===true;
 }
+async function catalogueNames(scope,found,keys){
+  if(!/^[a-f0-9]{64}$/.test(scope||""))return {groups:found.groups||{},evidence:found.evidence||{}};
+  const cacheKey="reader-project-names:"+scope;
+  return navigator.locks.request(cacheKey,async()=>{
+    const session=chrome.storage.session,prior=(await session.get(cacheKey))[cacheKey]||[];
+    const cache=ReaderRoutes.projectNameCache(prior),evidence={...found.evidence};
+    for(const key of keys)evidence[key]||={source:"missing",confidence:"none"};
+    const result=cache.merge(scope,{groups:found.groups,evidence},found.at);
+    const entries=cache.entries();
+    if(JSON.stringify(entries)!==JSON.stringify(prior))await session.set({[cacheKey]:entries});
+    return result;
+  });
+}
 chrome.runtime.onMessage.addListener((m,s,reply)=>{
   if(m?.kind==="batch-source-error"&&source(s)){
     (async()=>{const {batchPlan,jobs=[],device}=await chrome.storage.local.get(["batchPlan","jobs","device"]);
@@ -30,7 +43,7 @@ chrome.runtime.onMessage.addListener((m,s,reply)=>{
       });
     })().catch(()=>{});return;
   }
-  if(!["batch-tabs","batch-discover","batch-capture"].includes(m?.kind))return;
+  if(!["batch-tabs","batch-discover","batch-project-names","batch-capture"].includes(m?.kind))return;
   (async()=>{
     await ReaderClient.trust;
     if(!await centerPage(s))return {};
@@ -48,11 +61,27 @@ chrome.runtime.onMessage.addListener((m,s,reply)=>{
       if(d?.error)throw Error(d.error);
       if(!d||d.path!==u.pathname||!saveUuid(d.nonce)||!Array.isArray(d.rows)||
         d.rows.some(r=>!r||typeof r.id!=="string"||!/^[\w-]{1,128}$/.test(r.id)||typeof r.title!=="string"))throw Error("source-changed");
-      const catalog=crypto.randomUUID(),record={...d,tab:tab.id,at:Date.now()};
+      const catalog=crypto.randomUUID(),at=Date.now(),keys=[...new Set(d.rows.map(r=>r.group).filter(ReaderRoutes.groupKey))];
       if(!await centerPage(s))throw Error("source-changed");
-      await chrome.storage.session.set({["catalog:"+catalog]:record});
-      if(!await centerPage(s)){await chrome.storage.session.remove("catalog:"+catalog);throw Error("source-changed");}
-      return {...d,catalog};
+      const names=await catalogueNames(d.scope,{...d,at},keys),record={...d,...names,tab:tab.id,at};
+      const binding={tab:tab.id,nonce:d.nonce,path:d.path,scope:d.scope,keys};
+      await chrome.storage.session.set({["catalog:"+catalog]:record,["name-watch:"+catalog]:binding});
+      if(!await centerPage(s)){await chrome.storage.session.remove(["catalog:"+catalog,"name-watch:"+catalog]);throw Error("source-changed");}
+      return {...d,...names,observed:d.evidence||{},catalog};
+    }
+    if(m.kind==="batch-project-names"){
+      if(!saveUuid(m.catalog))throw Error("source-changed");
+      const key="name-watch:"+m.catalog,binding=(await chrome.storage.session.get(key))[key];
+      if(!binding?.scope)throw Error("source-changed");
+      const tab=await chrome.tabs.get(binding.tab),url=new URL(tab.url);
+      if(url.origin!=="https://chatgpt.com"||url.pathname!==binding.path)throw Error("source-changed");
+      const changed=await chrome.tabs.sendMessage(tab.id,{kind:"reader-batch-names",nonce:binding.nonce,path:binding.path,scope:binding.scope,
+        revision:m.revision,recheck:m.recheck===true,missing:binding.keys.includes(m.missing)?m.missing:null},{frameId:0});
+      if(!changed||changed.error||!await centerPage(s))throw Error("source-changed");
+      if(changed.unchanged)return {unchanged:true};
+      const names=await catalogueNames(binding.scope,changed,binding.keys);
+      if(!await centerPage(s))throw Error("source-changed");
+      return {catalog:m.catalog,scope:binding.scope,namesRevision:changed.namesRevision,observed:changed.evidence||{},...names};
     }
     return navigator.locks.request("reader-start",async()=>{
       if(!await centerPage(s))throw Error("source-changed");

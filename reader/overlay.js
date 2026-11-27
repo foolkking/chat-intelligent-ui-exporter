@@ -44,6 +44,7 @@ globalThis.ReaderOverlay = ({read,busy}) => {
   let notice="",readStep=null,compact=false,composing=false,stale=false,changedTimer,revealCurrent=false;
   let loadBody=async id=>ReaderPageIndex.domBody(id),searchCtl,searchTimer,searchResult,searchHits=[],searchStats,searchQuery="",searchStopped=false;
   let chapters,landed=null,landedSection,loadFiles,fileCtl,fileRows=new Map(),fileCursor=0,fileError=false;
+  let diagnosticModel,nativeVerified=false,nativeRetry=0;
   let previewCtl,previewTimer,previewBox,previewOwner,restoringPreview=false;
   const positions=new Map();
   const frameBox=make("section","frame"),work=make("div","work"),nav=make("nav"),query=make("input"),finder=make("div","find");
@@ -166,13 +167,14 @@ globalThis.ReaderOverlay = ({read,busy}) => {
     fileCursor=loadFiles?0:rows.length;
     if(!loadFiles)for(const row of supplied.values())if(row.files?.length)fileRows.set(row.id,row.files);
     loadedVersion=ReaderPageIndex.sample();partial=!data.complete;
+    diagnosticModel={rows,branch:data.branch,complete:!!data.complete};nativeVerified=false;nativeRetry=0;
     const route=location.pathname;
     const model=ReaderChapterWindow({rows,load:data.loadChapters||((id)=>supplied.get(id).headings||[]),
       valid:()=>chapters===model&&route===location.pathname&&!frameBox.hidden&&view==="outline"&&!stale&&loadedVersion===ReaderPageIndex.sample(),
       patch:(updates,window)=>{
         if(landed?.heading!==undefined&&updates.has(landed.id)){
-          const at=updates.get(landed.id)?.sections[landed.heading];
-          if(!at||at.text!==landedSection?.text||at.level!==landedSection.level||at.occurrence!==landedSection.occurrence)landed={id:landed.id};
+          const changed=updates.get(landed.id),at=changed&&ReaderPageIndex.chapterIndex(changed.headings,landedSection?.target.chapter);
+          if(at==null||at<0)landed={id:landed.id};else{landed=changed.sections[at].target;landedSection=changed.sections[at];}
         }
         if(render.treeRows===rows)render.outline.patchChapters(updates,window);
         if(!jumpCtl&&!frameBox.hidden&&view==="outline"&&!find&&tab==="outline")activeRow();
@@ -214,12 +216,13 @@ globalThis.ReaderOverlay = ({read,busy}) => {
     container.addEventListener("mouseleave",leave);
     container.addEventListener("focusout",e=>{if(!container.contains(e.relatedTarget))stopPreview();});
   }
-  async function locate(target,owner){
+  async function locate(target,owner,{trial=false}={}){
     ReaderPageIndex.clearFocus();
     stopPreview();stopJump();chapters?.pause();stopFiles();if(busy()){notice=L("请等待当前保存完成后定位。","Finish the current save before jumping.");paintStatus();return;}
     if(stale||loadedVersion!==ReaderPageIndex.sample()){
       stale=partial=true;notice=L("对话已变化，请重新读取目录后定位。","The conversation changed. Reload the outline before jumping.");paintStatus();return;}
-    readCtl?.abort();readCtl=null;stopSearch();const ctl=new AbortController();jumpCtl=ctl;owner?.setAttribute("aria-busy","true");notice=L("正在定位…","Locating…");paintStatus();
+    readCtl?.abort();readCtl=null;stopSearch();const ctl=new AbortController();jumpCtl=ctl;owner?.setAttribute("aria-busy","true");
+    notice=target.heading===undefined?L("正在定位…","Locating…"):L("正在定位章节…","Locating chapter…");paintStatus();
     const model=chapters,epoch=routeEpoch,version=loadedVersion;
     const current=()=>!ctl.signal.aborted&&jumpCtl===ctl&&epoch===routeEpoch&&model===chapters&&version===ReaderPageIndex.sample();
     try{let body;
@@ -227,20 +230,22 @@ globalThis.ReaderOverlay = ({read,busy}) => {
       if(target.query)body=await loadBody(target.id,ctl.signal);
       else if(target.heading!==undefined){try{body=await loadBody(target.id,ctl.signal);}catch{/* A semantic DOM title can still be proved without text fallback. */}}
       ctl.signal.throwIfAborted();if(loadedVersion!==ReaderPageIndex.sample())throw Error("Source changed");
-      const result=await ReaderPageIndex.jump(rows,target,ctl.signal,p=>{
-        if(!ctl.signal.aborted){notice=L(`正在定位 · 已核对 ${p.probes} 次`, `Locating · ${p.probes} checked positions`);paintStatus();}
-      },body,{detail,order:model.order,version,loadBody});if(!current())return;
+      const result=await ReaderPageIndex.jump(rows,target,ctl.signal,undefined,body,{detail,order:model.order,version,loadBody,nativeTrial:trial,qualifyNative:!nativeVerified,
+        nativePrepare:!partial&&(trial||performance.now()>=nativeRetry)?globalThis.ReaderNativeScroll?.prepare:null});if(!current())return;
+      if(["unsupported","uncancellable","unverified"].includes(result.metrics?.nativeStatus)){nativeVerified=false;nativeRetry=performance.now()+30000;}
       notice=result.ok?(result.kind==="answer-fallback"?L("已定位所属回答，章节尚未能确认。","At the owning answer. The chapter could not be verified."):
         result.kind==="message-fallback"?L("已定位所属消息；无法确认具体附件。","At the owning message; the exact file could not be verified."):""):
         L("未能确认原文位置。可重试或重新读取目录。","Location unconfirmed. Retry or reload the outline.");
       if(result.ok){
         // Only the verified outcome may select a chapter. An attachment's
         // explicit message-level fallback never implies chapter precision.
-        landed=["heading","heading-text"].includes(result.kind)?target:{id:target.id};
+        landed=["heading","heading-text","text","file"].includes(result.kind)?target:{id:target.id};
         landedSection=detail.sections?.[landed.heading];
         void model.move(target.id);activeRow(landed);
-        if(compact&&!["answer-fallback","message-fallback"].includes(result.kind)){jumpCtl=null;hide(true);}
+        if(result.metrics?.strategy==="native"&&!result.kind.endsWith("-fallback"))nativeVerified=true;
+        if(!trial&&compact&&!["answer-fallback","message-fallback"].includes(result.kind)){jumpCtl=null;hide(true);}
       }
+      return result;
     }catch{if(!ctl.signal.aborted)notice=L("定位中断，可重试。","Location interrupted. Retry.");}
     finally{if(jumpCtl===ctl){owner?.removeAttribute("aria-busy");jumpCtl=null;}paintStatus();}
   }
@@ -253,7 +258,8 @@ globalThis.ReaderOverlay = ({read,busy}) => {
       const target=confirmed||(row?(detail&&ReaderPageIndex.currentSection({...row,...detail},id))||{id}:null);
       render.outline.setActive(target,{reveal:!!target&&revealCurrent,follow:!!confirmed});if(target)revealCurrent=false;return;
     }
-    list.querySelectorAll("[data-mid]").forEach(n=>{const active=n.dataset.mid===id;n.classList.toggle("active",active);
+    list.querySelectorAll("[data-mid]").forEach(n=>{const active=n.dataset.mid===id&&!!confirmed&&
+      (find?n.dataset.occurrence===String(confirmed.occurrence)&&confirmed.query===searchQuery:n.dataset.file===String(confirmed.file));n.classList.toggle("active",active);
       if(active)n.setAttribute("aria-current","location");else n.removeAttribute("aria-current");});
   }
   function item(copy,target,cls){
@@ -284,8 +290,8 @@ globalThis.ReaderOverlay = ({read,busy}) => {
         onLocate:locate,onPreview:previewQuestion,onBeforeRender:stopPreview,
         onChange:({target,expanded})=>{if(expanded){for(const id of target?[target.id]:chapters.expanded())void chapters.request(id);}}});
       if(render.treeRows!==rows){
-        render.treeRows=rows;render.outline.setRows(rows,turns);
-        if(chapters?.center()>=0)render.outline.patchChapters(chapters.snapshot(),{open:chapters.centerId()});
+        render.treeRows=rows;render.outline.setRows(rows,turns,{windowed:true});
+        if(chapters?.center()>=0)render.outline.patchChapters(chapters.snapshot(),{open:chapters.centerId(),allowed:chapters.expanded()});
       }else render.outline.render();
       activeRow();paintStatus();return;
     }
@@ -294,6 +300,7 @@ globalThis.ReaderOverlay = ({read,busy}) => {
         const row=rows[chapters.order.get(id)],i=chapters.owner.get(id),seq=L(`第 ${i+1} 轮`,`Turn ${i+1}`);
         const role=seq+" · "+(row.role==="user"?L("提问","Question"):L("回答","Answer"));
         files.forEach((file,k)=>add(()=>{const b=item(file.name||file,{id:row.id,file:k},"result");
+          b.dataset.file=String(k);
           const type={image:L("图片","Image"),file:L("文件","File"),table:L("表格","Table")}[file.type];
           b.append(make("small","",role+(type?" · "+type:"")));return b;}));
     }
@@ -358,6 +365,14 @@ globalThis.ReaderOverlay = ({read,busy}) => {
   }
   globalThis.ReaderOpenLibrary=()=>open("library");globalThis.ReaderCloseOverlay=()=>hide();
   globalThis.ReaderPauseNavigationForCapture=pauseForCapture;
+  globalThis.ReaderNavigationDiagnostics={
+    model:()=>chapters&&!partial&&!stale&&!busy()&&!ReaderPageIndex.generating()&&path===location.pathname&&loadedVersion===ReaderPageIndex.sample()?diagnosticModel:null,
+    trial:async id=>{
+      if(!chapters||frameBox.hidden||view!=="outline"||partial||!globalThis.ReaderNativeScroll)return {status:"unavailable"};
+      const result=await locate({id},null,{trial:true});
+      return {status:result?.kind||result?.reason||"cancelled",native:result?.metrics?.nativeStatus,enabled:nativeVerified};
+    }
+  };
   globalThis.ReaderOpenWorkspace=want=>open(["outline","library","import"].includes(want)?want:"outline");
   shadow.addEventListener("keydown",e=>{if(e.key==="Escape"){e.preventDefault();e.stopPropagation();
       if(jumpCtl||readCtl||searchCtl)cancelWork();else if(previewBox)stopPreview(true);else if(find){switchList(tab,false);tabs[2].focus({preventScroll:true});}else hide(true);}});

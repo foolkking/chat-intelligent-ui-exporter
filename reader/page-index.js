@@ -53,7 +53,7 @@ globalThis.ReaderPageIndex = (() => {
       // An unlabelled spinner SVG/canvas is not evidence of an answer.
       // Text inside real diagrams and explicit file/image nodes still qualify.
       if(text?!/\S/.test(n.data):!n.matches("img[src],video[src],a[download],[data-file-name]"))continue;
-      if(!owner.closest(ignoredBody)&&painted(owner))return {node:owner,text:text?n.data:""};
+      if(!owner.closest(ignoredBody)&&painted(owner))return {node:owner,text:text?n.data:"",textNode:text?n:null};
     }
     return null;
   }
@@ -128,12 +128,23 @@ globalThis.ReaderPageIndex = (() => {
   const copy=s=>Array.from(s||"").join("");
   function sections(row){
     const stack=[],seen=new Map();
-    return (row.headings||[]).map((h,index)=>{
+    const list=row.headings||[],conversation=/\/c\/([\w-]+)\/?$/.exec(location.pathname)?.[1];
+    return list.map((h,index)=>{
       while(stack.length&&stack.at(-1).level>=h.level)stack.pop();
       const key=JSON.stringify([h.level,h.text]),occurrence=seen.get(key)||0;seen.set(key,occurrence+1);
-      const section={index,level:h.level,text:h.text,parent:stack.at(-1)?.index??null,occurrence,target:{id:row.id,heading:index}};
+      const chapter={text:h.text,level:h.level,occurrence,parents:stack.map(p=>p.text),
+        ancestry:stack.map(p=>[p.level,p.text,p.occurrence]),before:list[index-1]?.text??null,after:list[index+1]?.text??null};
+      const section={index,level:h.level,text:h.text,parent:stack.at(-1)?.index??null,occurrence,target:{id:row.id,heading:index,conversation,chapter}};
       stack.push(section);return section;
     });
+  }
+  function chapterIndex(list,chapter){
+    if(!chapter)return -1;
+    const path=JSON.stringify(chapter.ancestry);
+    const matches=sections({headings:list}).filter(s=>s.text===chapter.text&&s.level===chapter.level&&JSON.stringify(s.target.chapter.ancestry)===path);
+    if(matches.length===1&&matches[0].occurrence===chapter.occurrence)return matches[0].index;
+    const candidate=matches.find(s=>s.occurrence===chapter.occurrence&&s.target.chapter.before===chapter.before&&s.target.chapter.after===chapter.after);
+    return candidate?.index??-1;
   }
   function metadata(row){
     const entry={id:copy(row.id),role:row.role,title:copy((row.title??tidy(row.body)).slice(0,220)),
@@ -234,10 +245,11 @@ globalThis.ReaderPageIndex = (() => {
     return `${text.length}:${hash}`;
   }
   let observer,inventoryDirty=true,identityVersion=-1,inventory=[],scans=0,bodyChecks=0;
-  let sourceCost,lastJump,jumpNumber=0,outcomes={};
+  let sourceCost,lastJump,jumpNumber=0,outcomes={},measurement;
   let hydrating=new WeakSet(),overflow=false;
   const dirty=new Set(),renderStamp=new WeakMap();
-  const evidenceSelector=source.identitySelector+","+source.roleSelector+",[data-current-node-id],[data-testid=stop-button],[data-talvt-turn-state],button[aria-label]";
+  const evidenceSelector=[source.identitySelector,source.roleSelector,source.timelineSelector,source.conversationSelector,source.unitSelector,
+    "[data-turn-key],[data-current-node-id],[data-testid=stop-button],[data-talvt-turn-state],button[aria-label]"].join(",");
   function mutations(records){
     for(const r of records){
       const node=r.target.nodeType===1?r.target:r.target.parentElement,owner=node?.closest(source.identitySelector);
@@ -255,13 +267,14 @@ globalThis.ReaderPageIndex = (() => {
       if(dirty.size>256){dirty.clear();overflow=true;}
     }
   }
-  function sample(force=false){
+  function sample(force=false,targetId){
     if(!observer&&typeof MutationObserver==="function"){
       observer=new MutationObserver(mutations);
       observer.observe(document.documentElement,{childList:true,subtree:true,characterData:true,attributes:true,
         attributeFilter:["class","style","hidden","inert","open","aria-hidden","aria-busy","aria-label","data-message-id",
           "data-message-author-role","data-response-body","data-heading-level","aria-level","role","data-conversation-role",
-          "data-chatgpt-search-message-ids","data-current-node-id","data-testid","data-talvt-turn-state"]});
+          "data-chatgpt-search-message-ids","data-current-node-id","data-testid","data-talvt-turn-state","data-app-action-timeline-scroll",
+          "data-thread-find-target","data-chatgpt-conversation-selection-target","data-turn-key","data-chatgpt-search-unit-key","data-content-search-unit-key"]});
     }
     if(observer)mutations(observer.takeRecords());
     if(location.pathname!==route){contents.clear();live.clear();dirty.clear();hydrating=new WeakSet();inventoryDirty=true;
@@ -282,7 +295,7 @@ globalThis.ReaderPageIndex = (() => {
     const examine=(id,el)=>{
       if(!el)return;
       const owner=el.closest(source.identitySelector);
-      if(live.get(id)===el&&!dirty.has(owner)&&!force)return;
+      if(live.get(id)===el&&!dirty.has(owner)&&(!force||targetId&&targetId!==id))return;
       const prior=contents.get(id);
       if(source.pending(el)){if(prior)uncertain.add(el);return;}
       const text=tidy(textMap(surface(el)).text);bodyChecks++;
@@ -369,12 +382,15 @@ globalThis.ReaderPageIndex = (() => {
     const key=h=>JSON.stringify([h.level,h.text]),groups=list=>{
       const map=new Map();list.forEach((h,i)=>{const k=key(h);if(!map.has(k))map.set(k,[]);map.get(k).push(i);});return map;};
     const nodes=titles(msg),actual=nodes.map(n=>({text:tidy(n.textContent),level:headingLevel(n)}));
-    const a=groups(expected),b=groups(actual);
+    const a=groups(expected),b=groups(actual),ancestry=list=>sections({headings:list}).map(s=>JSON.stringify(s.target.chapter.ancestry));
+    let expectedParents,actualParents;
     function match(i){
       const k=key(expected[i]),origins=a.get(k),rendered=b.get(k);
       if(!rendered||rendered.length!==origins.length)return null;
       const at=rendered[origins.indexOf(i)];
       if(origins.length>1){
+        expectedParents??=ancestry(expected);actualParents??=ancestry(actual);
+        if(expectedParents[i]!==actualParents[at])return null;
         // Shared, unique landmarks must stay on the same side of this
         // occurrence. Equal counts alone do not disambiguate reordered groups.
         for(const [label,list] of a){const other=b.get(label);
@@ -391,6 +407,11 @@ globalThis.ReaderPageIndex = (() => {
     }
     let node=msg,kind="message";
     if(target.heading!==undefined){
+      if(target.chapter){
+        if(target.conversation&&target.conversation!==/\/c\/([\w-]+)\/?$/.exec(location.pathname)?.[1])return null;
+        const at=chapterIndex(row.headings,target.chapter);if(at<0)return null;
+        target={...target,heading:at};
+      }
       if(fuse){
         const requested=row.headings[target.heading];
         if(!requested)return null;
@@ -427,6 +448,10 @@ globalThis.ReaderPageIndex = (() => {
       }
       node=layout.match(target.heading);
       kind="heading";if(!node)return null;
+      if(target.chapter?.parents.length){
+        const actual=sections({headings:layout.nodes.map(n=>({text:tidy(n.textContent),level:headingLevel(n)}))});
+        if(JSON.stringify(actual[layout.nodes.indexOf(node)]?.target.chapter.ancestry)!==JSON.stringify(target.chapter.ancestry))return null;
+      }
     }
     if(target.file!==undefined){
       const file=row.files[target.file];if(!file)return null;
@@ -456,12 +481,65 @@ globalThis.ReaderPageIndex = (() => {
   function aligned(root,top,view,{start,extent}=axis(root)){
     return Math.max(start,Math.min(start+extent,root.scrollTop+top-view.top));
   }
-  function readingLine(view,r){
+  function readingLine(view){
     const room=Math.max(0,view.bottom-view.top);
     // Leave a visible beginning plus context above the composer. Tall answers
     // expose their opening rather than aligning their offscreen bottom.
-    const reserve=Math.min(room,Math.max(room*.25,Math.min(r.height,96)+16));
+    const reserve=Math.min(room,Math.max(room*.25,Math.min(room*.4,96)));
     return view.bottom-reserve;
+  }
+  function startVisible(r,view){
+    return inside(r,view)&&r.top>=view.top-13&&r.top<=view.bottom-Math.min(8,r.height);
+  }
+  function accurate(root,r,view){
+    if(!startVisible(r,view))return false;
+    // At the first/last scroll boundary only the reachable line is meaningful.
+    const next=aligned(root,r.top,{...view,top:readingLine(view)});
+    return Math.abs(next-root.scrollTop)<=2;
+  }
+  function exposed(msg,node,r,view){
+    if(typeof document.elementFromPoint!=="function")return true; // Layout fixtures do not provide painting.
+    const left=Math.max(view.left,r.left),right=Math.min(view.right,r.right),top=Math.max(view.top,r.top),bottom=Math.min(view.bottom,r.bottom);
+    if(right<=left||bottom<=top)return false;
+    const y=top+Math.min(8,(bottom-top)/2);
+    const start=getComputedStyle(node).direction==="rtl"?right-Math.min(8,(right-left)/2):left+Math.min(8,(right-left)/2);
+    return [start,(left+right)/2].some(x=>{
+      const hit=document.elementFromPoint(x,y);
+      return hit&&msg.contains(hit)&&(hit.contains(node)||node.contains(hit));
+    });
+  }
+  function opening(content){
+    const node=content.node,n=content.textNode,at=n?.data.search(/\S/);
+    if(at>=0){
+      const range=document.createRange();range.setStart(n,at);range.setEnd(n,at+1);
+      if(range.getClientRects){
+        return {node,range,rect:()=>[...range.getClientRects()].find(r=>r.width>0&&r.height>0)||range.getBoundingClientRect()};
+      }
+    }
+    return {node,rect:()=>node.getBoundingClientRect()};
+  }
+  function inspectLanding(row){
+    sample();const el=live.get(row.id);
+    if(!el||uncertain.has(el)||source.roleOf(el)!==row.role)return null;
+    const first=firstContent(el);if(!first)return null;
+    const dest=opening(first),root=scroller(dest.node);if(!root)return null;
+    const view=range(root),r=dest.rect();
+    return {node:dest.node,top:r.top,visibleStart:startVisible(r,view)&&exposed(el,dest.node,r,view),error:r.top-readingLine(view)};
+  }
+  function inspectTarget(row){
+    sample();const scope=source.scopeInfo(),msg=live.get(row.id);
+    if(!scope)return {state:"no-active-timeline"};
+    const other=source.preparationShells(row.id,row.role,row.alias).filter(n=>!msg||!msg.contains(n)&&!n.contains(msg));
+    if(live.has(row.id)&&!msg||other.length>(msg?0:1))return {state:"ambiguous"};
+    if(!msg&&!other.length)return {state:"no-identified-mount"};
+    const node=msg||other[0],root=scroller(node),box=node.getBoundingClientRect(),body=msg&&surface(msg);
+    const skipped=getComputedStyle(node).contentVisibility==="hidden"||body?.checkVisibility&&
+      !body.checkVisibility({contentVisibilityAuto:true,visibilityProperty:true,opacityProperty:true});
+    const ready=msg&&!uncertain.has(msg)&&firstContent(msg);
+    return {state:skipped?"css-skipped":!msg?"shell-only":uncertain.has(msg)?"awaiting-corroboration":ready?"body-ready":
+      node.matches('[aria-busy=true]')||node.querySelector('[aria-busy=true]')?"loading":"body-or-layout-pending",
+      scrollport:root===scope.root?"timeline":root===document.scrollingElement?"document":"nested",
+      shellHeight:Math.round(box.height),bodyHeight:body?Math.round(body.getBoundingClientRect().height):null};
   }
   let releaseFocus;
   function clearFocus(){releaseFocus?.();}
@@ -520,18 +598,22 @@ globalThis.ReaderPageIndex = (() => {
     signal?.throwIfAborted();
     const started=performance.now(),initialScans=scans,initialChecks=bodyChecks;
     const path=location.pathname,version=options.version??sample(),order=options.order||new Map(rows.map((r,i)=>[r.id,i])),index=order.get(target.id);
-    const run=++jumpNumber;let firstShell,firstReady;
+    const run=++jumpNumber;let firstShell,firstReady,nativeStatus="unused",strategy="dom",lineError,rebound=0;
     function record(outcome){
       const end=performance.now(),metrics={elapsedMs:end-started,historyMs:(firstShell??end)-started,
         bodyWaitMs:firstShell===undefined?0:(firstReady??end)-firstShell,landingMs:firstReady===undefined?0:end-firstReady,
-        inventoryScans:scans-initialScans,bodyChecks:bodyChecks-initialChecks};
-      if(path===location.pathname){outcomes[outcome]=(outcomes[outcome]||0)+1;if(run===jumpNumber)lastJump={outcome,...metrics};}
+        inventoryScans:scans-initialScans,bodyChecks:bodyChecks-initialChecks,strategy,nativeStatus,lineErrorPx:lineError,corrections:rebound};
+      const observation={target:target.query?"search":target.file!==undefined?"file":target.heading!==undefined?"chapter":"message",outcome,...metrics};
+      measurement?.(observation);
+      if(path===location.pathname){outcomes[outcome]=(outcomes[outcome]||0)+1;if(run===jumpNumber)lastJump=observation;}
       return metrics;
     }
     const fail=reason=>({ok:false,reason,metrics:record(reason)});
     if(index===undefined)return fail("missing");
     if(order.size!==rows.length)return fail("target");
     const row={...rows[index],...options.detail,...(targetBody===undefined?{}:{body:targetBody})},now=performance.now(),hardEnd=now+45000;
+    if(target.conversation&&target.conversation!==/\/c\/([\w-]+)\/?$/.exec(path)?.[1])return fail("changed");
+    if(target.chapter){const ordinal=chapterIndex(row.headings||[],target.chapter);if(ordinal<0)return fail("target");target={...target,heading:ordinal};}
     if(target.heading!==undefined&&!row.headings?.[target.heading]||target.file!==undefined&&!row.files?.[target.file])return fail("target");
     let until=now+12000,best=Infinity,advances=0,lastProbe;
     let root,shape="",probes=0,low=0,high=Infinity,stable=0,previous,lastReason="unmounted",interrupted=false;
@@ -542,12 +624,12 @@ globalThis.ReaderPageIndex = (() => {
       // Native scroll events also result from our own writes; only trusted
       // user intent cancels. The initiating button event has already run.
       if(e.isTrusted&&(!e.key||["PageUp","PageDown","Home","End","ArrowUp","ArrowDown"," "].includes(e.key))){
-        interrupted=true;notify();
+        interrupted=true;proofCtl.abort();notify();
       }
     };
     const events=["wheel","touchstart","pointerdown","keydown"];
-    const check=()=>{signal?.throwIfAborted();if(interrupted)throw new DOMException("Navigation cancelled","AbortError");};
-    const changed=force=>path!==location.pathname||sample(force)!==version||!!unmatched||wasGenerating;
+    const check=()=>{signal?.throwIfAborted();if(interrupted||run!==jumpNumber)throw new DOMException("Navigation cancelled","AbortError");};
+    const changed=force=>path!==location.pathname||sample(force,target.id)!==version||!!unmatched||wasGenerating;
     const pause=()=>new Promise(resolve=>{
       let frame;
       const done=()=>{if(wake!==done)return;wake=undefined;cancelAnimationFrame(frame);resolve();};
@@ -555,13 +637,22 @@ globalThis.ReaderPageIndex = (() => {
     });
     for(const event of events)document.addEventListener(event,input,{capture:true,passive:true});
     signal?.addEventListener("abort",notify,{once:true});
-    const expire=()=>{expired=true;notify();};
+    const expire=()=>{expired=true;proofCtl.abort();notify();};
     let deadline=setTimeout(expire,12000);
     function advance(){
       until=Math.min(hardEnd,performance.now()+12000);clearTimeout(deadline);
       deadline=setTimeout(expire,Math.max(0,until-performance.now()));
     }
     let cached,stage=0,known=[],knownScan=-1,shells=[],shellScan=-1,checkedShell,proof,readingProof=false;
+    let watched,layoutWatch,bodyWatch,nativeTried=false,nativeWait=0,probeAnchor,lastGeometry;
+    function watchBody(node){
+      if(node===watched)return;
+      watched=node;layoutWatch?.disconnect();bodyWatch?.disconnect();
+      if(!node)return;
+      const refresh=()=>{cached=null;notify();};
+      if(typeof ResizeObserver==="function"){layoutWatch=new ResizeObserver(refresh);layoutWatch.observe(node);}
+      bodyWatch=new MutationObserver(refresh);bodyWatch.observe(node,{childList:true,subtree:true,characterData:true,attributes:true});
+    }
     function shellsFor(msg,fresh=false){
       if(fresh||shellScan!==scans){shells=source.preparationShells(target.id,row.role,row.alias);shellScan=scans;}
       return shells.filter(el=>!msg||el!==msg&&!el.contains(msg)&&!msg.contains(el));
@@ -580,28 +671,37 @@ globalThis.ReaderPageIndex = (() => {
       // content). Probe it periodically and resolve afresh at certification.
       if(!fresh&&cached?.msg===msg&&cached.stamp===stamp&&(time-cached.time<cached.interval||
           cached.dest&&!["answer-fallback","message-fallback"].includes(cached.dest.kind)&&painted(cached.dest.node))&&
-          (!cached.dest||cached.dest.node.isConnected)&&!uncertain.has(msg))return cached.dest;
+          (!cached.dest||msg.contains(cached.dest.node)&&(!cached.dest.range||
+            msg.contains(cached.dest.range.startContainer)&&msg.contains(cached.dest.range.endContainer)))&&!uncertain.has(msg))return cached.dest;
       let dest=null;
       const content=!uncertain.has(msg)&&firstContent(msg);
       if(content){
         if(firstReady===undefined){firstReady=time;advance();}
         if(target.heading!==undefined||target.file!==undefined||target.query)dest=destination(msg,row,target,{fuse:true});
-        else dest={kind:"message",node:content.node};
-        if(dest&&dest.kind==="message-fallback")dest={kind:dest.kind,node:content.node};
+        else dest={kind:"message",...opening(content)};
+        if(dest&&dest.kind==="message-fallback")dest={kind:dest.kind,...opening(content)};
         if(target.heading!==undefined&&dest&&(!painted(dest.node)||!(dest.rect().height>0)))dest=null;
-        if(!dest&&target.heading!==undefined)dest={kind:"answer-fallback",node:content.node};
+        if(!dest&&target.heading!==undefined)dest={kind:"answer-fallback",...opening(content)};
         if(dest&&!dest.rect)dest.rect=()=>dest.node.getBoundingClientRect();
       }
       const interval=cached?.msg===msg&&cached.stamp===stamp?Math.min(1600,cached.interval*2):200;
       cached={msg,stamp,time,dest,interval};return dest;
     }
     function certify(current){
-      check();if(changed(true)||live.get(target.id)!==current.msg||source.roleOf(current.msg)!==row.role||shellsFor(current.msg,true).length)return null;
+      check();if(!exposed(current.msg,current.dest.node,current.r,current.view))return null;
+      if(changed(true)||live.get(target.id)!==current.msg||source.roleOf(current.msg)!==row.role||shellsFor(current.msg,true).length)return null;
       const dest=resolve(current.msg,true);
       if(!dest||!painted(dest.node)||!current.msg.contains(dest.node))return null;
       const root=scroller(dest.node),view=range(root),r=dest.rect();
-      if(!inside(r,view)||!sameLanding(current,{msg:current.msg,root,dest,r,view,offset:root.scrollTop}))return null;
-      check();try{focusLanding(current.msg,r,view,signal);}catch{clearFocus();}
+      if(!accurate(root,r,view)||!exposed(current.msg,dest.node,r,view)||!sameLanding(current,{msg:current.msg,root,dest,r,view,offset:root.scrollTop}))return null;
+      lineError=Math.round(r.top-readingLine(view));
+      check();try{
+        let highlight=r;
+        if(dest.kind==="message"||dest.kind.endsWith("-fallback")){
+          const block=dest.node.getBoundingClientRect();highlight={...r,top:r.top,bottom:Math.max(r.bottom,Math.min(block.bottom,r.top+80)),left:block.left,right:block.right};
+        }
+        focusLanding(current.msg,highlight,view,signal);
+      }catch{clearFocus();}
       return {ok:true,kind:dest.kind,probes,metrics:record(dest.kind)};
     }
     try{
@@ -612,16 +712,30 @@ globalThis.ReaderPageIndex = (() => {
         const other=shellsFor(msg);
         if(other.length>1||msg&&other.length){previous=null;stable=0;lastReason="target";await pause();continue;}
         const shell=other[0];
+        watchBody(msg||shell);
         if(shell&&!msg&&source.visible(shell)&&firstContent(shell)&&checkedShell!==shell){
           // CSS may resume painting without an attribute/child-list mutation.
           // Only rebuild the identity inventory on this observed transition.
           checkedShell=shell;if(changed(true))return fail("changed");continue;
         }
         if((msg||shell)&&firstShell===undefined){firstShell=performance.now();advance();}
-        if(!found&&!shell&&knownScan!==scans){known=inventory.filter(el=>rows[order.get(idOf(el))]?.role===source.roleOf(el));knownScan=scans;}
+        if(!found&&!shell&&knownScan!==scans){known=inventory.filter(el=>rows[order.get(idOf(el))]?.role===source.roleOf(el));knownScan=scans;probeAnchor=null;}
         const dest=msg&&resolve(msg);
+        if(options.nativeTrial&&!nativeTried&&dest)return fail("already-rendered");
+        if(!dest&&!nativeTried&&options.nativePrepare){
+          nativeTried=true;
+          try{nativeStatus=await options.nativePrepare(target.id,proofCtl.signal,{trial:!!(options.nativeTrial||options.qualifyNative)});}
+          catch{nativeStatus=proofCtl.signal.aborted?"cancelled":"unsupported";}
+          check();if(changed())return fail("changed");if(expired||performance.now()>=until)break;
+          if(nativeStatus==="requested"){strategy="native";nativeWait=performance.now()+650;await pause();continue;}
+          if(options.nativeTrial)return fail("native-unavailable");
+        }
+        // E2 isolates native preparation. No geometric history or shell scroll
+        // can contribute to a passing native experiment.
+        if((options.nativeTrial||performance.now()<nativeWait)&&!dest){await pause();continue;}
         const views=new Map(),viewOf=root=>{if(!views.has(root))views.set(root,range(root));return views.get(root);};
-        const anchor=dest?.node||msg||shell||known.find(el=>inside(el.getBoundingClientRect(),viewOf(scroller(el))))||known[0];
+        const anchor=dest?.node||msg||shell||(probeAnchor?.isConnected?probeAnchor:
+          (probeAnchor=known.find(el=>inside(el.getBoundingClientRect(),viewOf(scroller(el))))||known[0]));
         const nextRoot=anchor&&scroller(anchor);
         if(!nextRoot?.isConnected){lastReason="unmounted";previous=null;stable=0;await pause();continue;}
         const view=viewOf(nextRoot),bounds=axis(nextRoot),nextShape=JSON.stringify([bounds.start,nextRoot.scrollHeight,nextRoot.clientHeight,view]);
@@ -635,20 +749,21 @@ globalThis.ReaderPageIndex = (() => {
             const box=(msg||shell).getBoundingClientRect();
             if(box.width>0&&Number.isFinite(box.top)){
               const top=aligned(root,box.top,{...view,top:readingLine(view,box)},bounds);
-              if(Math.abs(top-root.scrollTop)>1){check();root.scrollTo({top,behavior:"instant"});}
+              if(Math.abs(top-root.scrollTop)>1){check();strategy="shell";root.scrollTo({top,behavior:"instant"});}
             }
             await pause();continue;
           }
           lastReason="hidden";
           if(dest.kind!=="answer-fallback"&&stage===0){stage=1;advance();}
-          const next=aligned(root,r.top,{...view,top:readingLine(view,r)},bounds);
+          const next=aligned(root,r.top,{...view,top:readingLine(view)},bounds);
           if(Math.abs(next-root.scrollTop)>1){
+            if(previous)rebound++;
             check();root.scrollTo({top:next,behavior:"instant"});stable=0;previous=null;
           }else{
             // Dirty identity evidence invalidates cached nodes; the success
             // boundary also does a full lookup. Never certify geometry alone.
             const current={msg,root,dest,r,view,offset:root.scrollTop};
-            stable=inside(r,view)&&sameLanding(previous,current)?stable+1:0;
+            stable=accurate(root,r,view)&&sameLanding(previous,current)?stable+1:0;
             previous=current;
             if(stable>=4&&dest.kind!=="answer-fallback"){
               const result=certify(current);if(result)return result;stable=0;previous=null;cached=null;
@@ -656,6 +771,10 @@ globalThis.ReaderPageIndex = (() => {
           }
         }else{
           previous=null;stable=0;lastReason="unmounted";
+          const since=performance.now();
+          if(lastGeometry?.root===root&&lastGeometry.shape===shape&&lastGeometry.scan===knownScan&&
+            Math.abs(lastGeometry.position-root.scrollTop)<1&&since-lastGeometry.time<280){await pause();continue;}
+          lastGeometry={root,shape,scan:knownScan,position:root.scrollTop,time:since};
           const top=root===document.scrollingElement?0:root.getBoundingClientRect().top;
           const unique=new Set(),duplicate=new Set();for(const el of known){const id=idOf(el);if(unique.has(id))duplicate.add(id);unique.add(id);}
           const anchors=known.filter(el=>!duplicate.has(idOf(el))&&!source.pending(el)&&!uncertain.has(el)&&scroller(el)===root).map(el=>({index:order.get(idOf(el)),r:el.getBoundingClientRect()}))
@@ -674,14 +793,14 @@ globalThis.ReaderPageIndex = (() => {
             if(a.index<index)low=Math.max(low,Math.min(max,y+a.r.height));
             if(a.index>index)high=Math.min(high,Math.max(0,y));
           }
-          const average=last.index>first.index?Math.abs(last.r.top-first.r.top)/(last.index-first.index):Math.max(80,first.r.height);
-          let y=position+first.r.top-top+(index-first.index)*average;
-          if(Number.isFinite(high)&&low<high)y=Math.max(low,Math.min(high,y));
-          y=Math.max(0,Math.min(max,y));
+          // Bisect bounds learned from identified rows. For the two real ends
+          // request the corresponding edge, which can also trigger pagination.
+          const ceiling=Math.min(max,high);
+          let y=index===0?0:index===rows.length-1?max:(Math.min(low,ceiling)+ceiling)/2;
           const waitingEdge=index<first.index&&position<=1&&y<=1||index>last.index&&position>=max-1&&y>=max-1;
           if(!waitingEdge&&Math.abs(y-position)<2&&low<Math.min(high,max))y=(low+Math.min(high,max))/2;
           const key=[first.index,last.index,Math.round(position),Math.round(y)].join(":");
-          if(key!==lastProbe){lastProbe=key;check();report({probes:++probes,advances});check();root.scrollTo({top:bounds.start+y,behavior:"instant"});}
+          if(key!==lastProbe){lastProbe=key;strategy="history";check();report({probes:++probes,advances});check();root.scrollTo({top:bounds.start+y,behavior:"instant"});}
         }
         await pause();
       }
@@ -689,19 +808,36 @@ globalThis.ReaderPageIndex = (() => {
       if(stable>=4&&previous?.dest.kind==="answer-fallback"){const result=certify(previous);if(result)return result;}
       return fail(lastReason);
     }catch(e){record(e.name==="AbortError"?"cancelled":"interrupted");throw e;}finally{
-      finished=true;proofCtl.abort();
+      finished=true;proofCtl.abort();bodyWatch?.disconnect();layoutWatch?.disconnect();
       clearTimeout(deadline);signal?.removeEventListener("abort",notify);
       for(const event of events)document.removeEventListener(event,input,true);
     }
   }
   function visible(){
-    sample();for(const [id,el] of live){
+    sample();let best=null,distance=Infinity;const views=new Map();
+    const native=typeof document.elementFromPoint==="function"&&source.timeline();
+    const root=native?.nodeType===1?native:inventory[0]&&scroller(inventory[0]);
+    if(native&&root){
+      const view=range(root),line=readingLine(view);
+      views.set(root,view);
+      for(const ratio of [.5,.35,.65]){
+        const hit=document.elementFromPoint(view.left+(view.right-view.left)*ratio,line);
+        if(!hit)continue;
+        const marker=hit.closest(source.roleSelector+","+source.identitySelector),id=marker&&idOf(marker),el=id&&live.get(id);
+        if(el&&!uncertain.has(el)&&el.contains(hit)&&surface(el).contains(hit)&&firstContent(el))return id;
+      }
+    }
+    for(const [id,el] of live){
       if(!el||uncertain.has(el))continue;
       const r=el.getBoundingClientRect(),root=scroller(el);if(!root)continue;
-      const view=range(root);
-      if(inside(r,view)&&firstContent(el)&&inside(surface(el).getBoundingClientRect(),view))return id;
+      if(!views.has(root))views.set(root,range(root));const view=views.get(root);
+      if(!inside(r,view))continue;
+      const body=surface(el).getBoundingClientRect(),line=readingLine(view);
+      if(!inside(body,view))continue;
+      const d=Math.max(body.top-line,line-body.bottom,0);
+      if(d<distance&&firstContent(el)){distance=d;best=id;if(d===0)break;}
     }
-    return null;
+    return best;
   }
   function currentSection(row,visibleId){
     if(!row)return null;sample();
@@ -712,7 +848,7 @@ globalThis.ReaderPageIndex = (() => {
     if(source.pending(msg))return target;
     if(!row.headings?.length)return target;
     const layout=chapterLayout(msg,row.headings,false),view=range(scroller(msg)),heading=layout.nodes.filter(el=>{
-      const r=el.getBoundingClientRect();return r.width>0&&r.height>0&&r.top<=view.top+1;
+      const r=el.getBoundingClientRect();return r.width>0&&r.height>0&&r.top<=readingLine(view)+1;
     }).at(-1);
     if(!heading)return target;
     const text=tidy(heading.textContent),level=headingLevel(heading);
@@ -751,6 +887,7 @@ globalThis.ReaderPageIndex = (() => {
     return {node,version:node?renderStamp.get(node.closest(source.identitySelector))||0:0};}
   // Available in the extension's isolated DevTools context for manual timing.
   // Counters stay in memory and contain no targets, text, URLs or credentials.
-  return {mounted,idOf,domRows,domBody,mountedFiles,fromBranch,corroborate,headings,assetFiles,localHeadings,renderState,metadata,mergeMounted,sections,tree,search,leaf,sample,revision:()=>revision,visible,currentSection,jump,clearFocus,matches,textTarget,destination,layout,observeLayout,generating,
-    recordSource:cost=>{sourceCost=cost;},metrics:()=>({source:{...sourceCost},outcomes:{...outcomes},last:lastJump?{...lastJump}:null})};
+  return {mounted,idOf,domRows,domBody,mountedFiles,fromBranch,corroborate,headings,assetFiles,localHeadings,renderState,metadata,mergeMounted,sections,chapterIndex,tree,search,leaf,sample,revision:()=>revision,visible,currentSection,jump,inspectLanding,inspectTarget,clearFocus,matches,textTarget,destination,layout,observeLayout,generating,
+    measure:listener=>{measurement=listener;},recordSource:cost=>{sourceCost=cost;},
+    metrics:()=>({source:{...sourceCost},outcomes:{...outcomes},last:lastJump?{...lastJump}:null})};
 })();

@@ -9,12 +9,14 @@ globalThis.ReaderProjectRow = function({id,label,name,sample,projects,value,draf
   const button=(copy,click)=>{const b=node("button",copy);b.type="button";b.onclick=click;return b;};
   const line=node("div",null,"mapping-row"),from=node("div"),title=node("label",label);
   title.htmlFor=id;from.append(title);
-  if(sample)from.append(node("small",L(`含「${sample}」`,`Includes “${sample}”`),"meta"));
+  const example=node("small",null,"meta");from.append(example);
   line.setAttribute("role","group");line.setAttribute("aria-label",label);
   const to=node("div",null,"mapping-target"),select=node("select");select.id=id;
-  const same=name&&projects.find(p=>p.name===name);
+  const uniqueSame=value=>{const matches=value?projects.filter(p=>p.name===value):[];return matches.length===1?matches[0]:null;};
+  let same=uniqueSame(name);
   select.add(new Option(L("Reader · 未分类","Reader · Unclassified"),""));
-  const add=p=>select.add(new Option("Reader · "+(p.label||p.name)+(p===same?L("（同名）"," (same name)"):""),p.id));
+  const options=new Map();
+  const add=p=>{const option=new Option("",p.id);options.set(p.id,option);select.add(option);};
   if(same)add(same);
   for(const p of projects)if(p!==same)add(p);
   const available=!value||projects.some(p=>p.id===value);
@@ -25,9 +27,9 @@ globalThis.ReaderProjectRow = function({id,label,name,sample,projects,value,draf
   select.value=available?value:"unavailable";
   select.onchange=()=>selectValue(select.value);
   to.append(select);line.dataset.ready=String(available&&!draft);
+  let suggestion;
   if(!draft){
-    if(same&&value!==same.id)to.append(button(L("选用同名项目","Use same-name project"),()=>selectValue(same.id)));
-    if(!same)to.append(button(name?L("新建同名项目…","Create same-name project…"):L("新建 Reader 项目…","Create Reader project…"),edit));
+    suggestion=button("",()=>same?selectValue(same.id):edit());to.append(suggestion);
   }else{
     const form=node("form",null,"mapping-editor"),field=node("input"),fieldLabel=node("label",L("Reader 项目名称","Reader project name"));
     form.setAttribute("aria-busy",String(!!draft.busy));
@@ -51,5 +53,20 @@ globalThis.ReaderProjectRow = function({id,label,name,sample,projects,value,draf
     const actions=node("div",null,"mapping-actions");actions.append(action,dismiss);
     update();form.append(fieldLabel,field,actions,status);to.append(form);
   }
+  line.updateSource=(nextLabel,nextName,nextSample)=>{
+    title.textContent=nextLabel;line.setAttribute("aria-label",nextLabel);
+    example.hidden=!nextSample;example.textContent=nextSample?L(`含「${nextSample}」`,`Includes “${nextSample}”`):"";
+    name=nextName;same=uniqueSame(name);
+    for(const p of projects){
+      const option=options.get(p.id);
+      if(option)option.textContent="Reader · "+(p.label||p.name)+(p===same?L("（同名）"," (same name)"):"");
+    }
+    if(suggestion){
+      const ambiguous=!!name&&!same&&projects.some(p=>p.name===name);
+      suggestion.hidden=ambiguous||!!same&&same.id===value;
+      suggestion.textContent=same?L("选用同名项目","Use same-name project"):name?L("新建同名项目…","Create same-name project…"):L("新建 Reader 项目…","Create Reader project…");
+    }
+  };
+  line.updateSource(label,name,sample);
   const arrow=node("span","→");arrow.setAttribute("aria-hidden","true");line.append(from,arrow,to);return line;
 };

@@ -13,7 +13,7 @@ globalThis.ReaderProjectRow = function({id,label,name,sample,projects,value,draf
   line.setAttribute("role","group");line.setAttribute("aria-label",label);
   const to=node("div",null,"mapping-target"),select=node("select");select.id=id;
   const same=name&&projects.find(p=>p.name===name);
-  select.add(new Option(L("Reader · 未归类","Reader · Unclassified"),""));
+  select.add(new Option(L("Reader · 未分类","Reader · Unclassified"),""));
   const add=p=>select.add(new Option("Reader · "+(p.label||p.name)+(p===same?L("（同名）"," (same name)"):""),p.id));
   if(same)add(same);
   for(const p of projects)if(p!==same)add(p);

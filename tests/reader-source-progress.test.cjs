@@ -40,6 +40,21 @@ test("explicit resumed null timestamps and diagnostics clear stopped UI; missing
     assert.equal(f.root.querySelector(".read-progress>progress").hidden,true,"completion must not leave an upload activity meter");
   }finally{f.close();}
 });
+test("an existing full-source conversation has an incremental-update main action and a separate open-saved action",async()=>{
+  let captures=0;
+  const f=await fixture({state:"previous"},{
+    async capture(_start,excerpt){assert.equal(excerpt,false);captures++;}
+  });
+  try{
+    assert.match(f.root.querySelector(".main").textContent,/增量更新/);
+    f.root.querySelector(".main").onclick({isTrusted:false});await f.settle();assert.equal(captures,0);
+    f.root.querySelector(".main").onclick({isTrusted:true});await f.settle();assert.equal(captures,1);
+    f.root.querySelector(".toggle").onclick({isTrusted:true});
+    const open=[...f.root.querySelectorAll(".menu button")].find(b=>b.textContent==="打开已存版本");
+    assert.ok(open);open.onclick({isTrusted:true});await f.settle();
+    assert.equal(f.requests.at(-1).kind,"open-saved");assert.equal(captures,1);
+  }finally{f.close();}
+});
 test("an append retains its own attempt, final state and counters rather than the previous full save",async()=>{
   let f;
   f=await fixture({state:"saved",progressKey:"save-record",stats:{sourceBytes:9000},startedAt:1000,finishedAt:2000},{

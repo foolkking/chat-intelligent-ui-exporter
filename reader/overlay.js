@@ -184,6 +184,7 @@ globalThis.ReaderOverlay = ({read,busy}) => {
     container.addEventListener("focusout",e=>{if(!container.contains(e.relatedTarget))stopPreview();});
   }
   async function locate(target,owner){
+    ReaderPageIndex.clearFocus();
     stopPreview();stopJump();if(busy()){notice=L("请等待当前保存完成后定位。","Finish the current save before jumping.");paintStatus();return;}
     if(stale||loadedVersion!==ReaderPageIndex.sample()){
       stale=partial=true;notice=L("对话已变化，请重新读取目录后定位。","The conversation changed. Reload the outline before jumping.");paintStatus();return;}
@@ -201,13 +202,14 @@ globalThis.ReaderOverlay = ({read,busy}) => {
         // Only the verified outcome may select a chapter. An attachment's
         // explicit message-level fallback never implies chapter precision.
         activeRow(["heading","heading-text"].includes(result.kind)?target:{id:target.id});
-        if(compact&&result.kind!=="message-fallback")hide(true);
+        if(compact&&result.kind!=="message-fallback"){jumpCtl=null;hide(true);}
       }
     }catch{if(!ctl.signal.aborted)notice=L("定位中断，可重试。","Location interrupted. Retry.");}
     finally{owner?.removeAttribute("aria-busy");if(jumpCtl===ctl)jumpCtl=null;paintStatus();}
   }
   function activeRow(confirmed){
-    if(frameBox.hidden||view!=="outline")return;const id=ReaderPageIndex.visible();
+    if(frameBox.hidden||view!=="outline"||jumpCtl&&!confirmed)return;
+    const id=confirmed?.id||ReaderPageIndex.visible();
     if(!find&&tab==="outline"&&render.outline){
       const row=render.rowMap?.get(id),target=confirmed||(row?ReaderPageIndex.currentSection(row)||{id}:null);
       render.outline.setActive(target,{reveal:revealCurrent});revealCurrent=false;return;
@@ -308,6 +310,7 @@ globalThis.ReaderOverlay = ({read,busy}) => {
   }
   async function toggle(){if(!frameBox.hidden){hide(true);return;}const r=await send("surface-tab");await open(["library","import"].includes(r?.view)?r.view:"outline",false);}
   function mount(){
+    if(path!==location.pathname)ReaderPageIndex.clearFocus();
     const p=location.pathname;if(p!==path){path=p;hide();for(const f of privateFrames.values())f.remove();privateFrames.clear();frame=null;rows=[];turns=[];loadBody=async id=>ReaderPageIndex.domBody(id);searchResult=null;searchHits=[];searchQuery="";
       expanded.clear();manualExpanded=false;positions.clear();query.value="";find=false;tab="outline";start=0;limit=64;stale=false;
       if(!ReaderRoutes.eligible(p)){host.remove();return;}}
@@ -324,7 +327,7 @@ globalThis.ReaderOverlay = ({read,busy}) => {
   // Background tabs cannot truthfully confirm a visible destination. Do not
   // resume an abandoned jump or a read when this document is shown again.
   document.addEventListener("visibilitychange",()=>{if(document.hidden){stopPreview();if(jumpCtl||readCtl||searchCtl)cancelWork();}});
-  addEventListener("pagehide",()=>{readCtl?.abort();readCtl=null;stopPreview();stopSearch();stopJump();});
+  addEventListener("pagehide",()=>{ReaderPageIndex.clearFocus();readCtl?.abort();readCtl=null;stopPreview();stopSearch();stopJump();});
   ReaderPageIndex.observeLayout(geometry);
   addEventListener("scroll",()=>{if(frameBox.hidden||view!=="outline"||updateTimer)return;
     updateTimer=setTimeout(()=>{updateTimer=null;activeRow();},90);},{capture:true,passive:true});
@@ -337,7 +340,7 @@ globalThis.ReaderOverlay = ({read,busy}) => {
       if(loadedVersion===ReaderPageIndex.sample()){
         if(!readCtl&&!jumpCtl&&!stale&&rows.length){const merged=ReaderPageIndex.mergeMounted(rows);if(merged!==rows){rows=merged;group();render();}}return;
       }
-      readCtl?.abort();readCtl=null;stopPreview();stopSearch();stopJump();stale=partial=true;
+      ReaderPageIndex.clearFocus();readCtl?.abort();readCtl=null;stopPreview();stopSearch();stopJump();stale=partial=true;
       notice=L("对话已变化，请重新读取目录。","The conversation changed. Reload the outline.");paintStatus();
     },160);
   }).observe(document.documentElement,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:["data-current-node-id","data-talvt-turn-state","data-chatgpt-search-message-ids"]});

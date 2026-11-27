@@ -68,13 +68,14 @@ async function act(m,s,path,host){
       const rec=await api("imports/"+j.iid);
       if(!await stillHere(s,path,device.id))return {error:"changed"};
       if(rec.status!=="committed"||!saveUuid(rec.conversation_id))return {state:"save",progressKey:null};
-    }else if(!j&&sourceLookupDevice===device.id){
+    }else if(!j&&(sourceLookupDevice===device.id||await ReaderClient.rememberedSource(device,id))){
       // Visiting a source is not consent to report its ID. Unknown local
-      // receipts are checked automatically only on an explicitly opted-in device.
+      // receipts are checked only for an explicitly submitted source or a
+      // device with the additional automatic-lookup opt-in.
       manualFinds.delete(s.tab.id); // Fresh authorized evidence supersedes an earlier manual hint.
       const capabilities=await api("capabilities");
       if(!await stillHere(s,path,device.id))return {error:"changed"};
-      const optedIn=async()=>(await chrome.storage.local.get("sourceLookupDevice")).sourceLookupDevice===device.id;
+      const optedIn=async()=>(await chrome.storage.local.get("sourceLookupDevice")).sourceLookupDevice===device.id||await ReaderClient.rememberedSource(device,id);
       if(capabilities.source_lookup===true&&await optedIn()){
         const receipt=await api("sources/status",ReaderClient.json("POST",{source_id:id}));
         if(!await stillHere(s,path,device.id))return {error:"changed"};
@@ -124,11 +125,11 @@ async function act(m,s,path,host){
   }
   const excerpt=m.kind==="start-append";
   if(m.kind!=="start"&&!excerpt)return {error:"unavailable"};
-  if(!excerpt&&!dest)return {state:"destination"};
   // Re-read under the start lock so the same source in two tabs cannot issue parallel tickets.
   return navigator.locks.request("reader-start",async()=>{
     const now=Date.now(),snapshot=await chrome.storage.local.get(["device","destination","jobs"]);
-    if(snapshot.device?.id!==device.id||!excerpt&&(snapshot.destination?.device!==device.id||snapshot.destination.project!==dest.project))return {error:"changed"};
+    if(snapshot.device?.id!==device.id||snapshot.device.user!==device.user||
+      !excerpt&&dest&&(snapshot.destination?.device!==device.id||snapshot.destination.project!==dest.project))return {error:"changed"};
     const job=(snapshot.jobs||[]).filter(x=>x.device===device.id&&x.sourceKey===key&&(x.mode==="append")===excerpt).at(-1);
     if(pendingSave(job))return {state:sourceDisplay(job,m.attempt)};
     const all=await chrome.storage.session.get(null);
@@ -138,15 +139,28 @@ async function act(m,s,path,host){
     const c=await api("capabilities");
     if(c.protocol!==1||c.import_profile!=="reader-chat-v1"||!c.capture||excerpt&&!c.selective_append)return {error:"unavailable"};
     if(c.resumable_capture!==true)return {state:"upgrade-required"};
-    if(!excerpt&&dest.project&&!(await api("projects")).some(p=>p.id===dest.project&&!p.default)){
+    // An explicit save/update may discover an existing source without a global
+    // browsing opt-in. Existing conversations keep their original project; a
+    // stale default project must not prevent an otherwise valid update.
+    let existing=false;
+    if(c.source_lookup===true){
+      const found=await api("sources/status",ReaderClient.json("POST",{source_id:id}));
+      if(!await stillHere(s,path,device.id))return {error:"changed"};
+      if(!found||!Object.hasOwn(found,"conversation_id")||found.conversation_id!==null&&!saveUuid(found.conversation_id))return {error:"unavailable"};
+      existing=saveUuid(found.conversation_id);
+    }
+    if(!excerpt&&!existing&&!dest)return {state:"destination"};
+    if(!excerpt&&!existing&&dest.project&&!(await api("projects")).some(p=>p.id===dest.project&&!p.default)){
       await chrome.storage.local.remove("destination");return {state:"destination"};
     }
     await host();if(!await stillHere(s,path,device.id))return {error:"changed"};
+    await ReaderClient.rememberSources(device,[id]);
+    if(!await stillHere(s,path,device.id))return {error:"changed"};
     const ticket=crypto.randomUUID(),attempt=crypto.randomUUID();
     await chrome.storage.session.set({["ticket:"+ticket]:{tab:s.tab.id,doc:s.documentId,path,device:device.id,
-      project:excerpt?null:dest.project||null,mode:excerpt?"append":"save",sourceKey:key,attempt,expires:Date.now()+30000,
+      project:excerpt||existing?null:dest.project||null,mode:excerpt?"append":"save",sourceKey:key,attempt,expires:Date.now()+30000,
       extendedSelection:excerpt&&c.selective_append_ranges===true}});
-    return {ticket,attempt,textOnly:!excerpt&&!!dest.textOnly,...(excerpt?{extendedSelection:c.selective_append_ranges===true}:{})};
+    return {ticket,attempt,textOnly:!excerpt&&!!dest?.textOnly,...(excerpt?{extendedSelection:c.selective_append_ranges===true}:{})};
   });
 }
 globalThis.ReaderSourceAction=act;
@@ -154,7 +168,7 @@ globalThis.ReaderSourceAction=act;
 chrome.runtime.onConnect.addListener(port=>{
   if(port.name!=="reader-display"||!source(port.sender))return;
   const notify=()=>{try{port.postMessage({refresh:true});}catch{/* document gone */}};
-  const wake=(changes,area)=>{if(area==="local"&&(changes.jobs||changes.destination||changes.device||changes.sourceLookupDevice))notify();};
+  const wake=(changes,area)=>{if(area==="local"&&(changes.jobs||changes.destination||changes.device||changes.sourceLookupDevice||changes.sourceChecks))notify();};
   // A receipt may settle while this known source document is behind the panel.
   // Only wake its already-connected port; do not query other tabs or their URLs.
   const activated=info=>{if(info.tabId===port.sender.tab.id)notify();};

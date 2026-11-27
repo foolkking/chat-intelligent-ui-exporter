@@ -1,7 +1,7 @@
 /* global READER_ORIGIN */
 globalThis.ReaderClient=(()=>{
   const base=READER_ORIGIN+"/api/extension/v1/", storage=chrome.storage.local;
-  const scopedKeys=["device","destination","jobs","exportJob","seenWarnings","sourceLookupDevice","batchPlan","batchMappings"];
+  const scopedKeys=["device","destination","jobs","exportJob","seenWarnings","sourceLookupDevice","sourceChecks","batchPlan","batchMappings"];
   const trust=Promise.all([storage,chrome.storage.session].map(s=>s.setAccessLevel({accessLevel:"TRUSTED_CONTEXTS"})))
     .then(()=>navigator.locks.request("reader-device",async()=>{
       const {device}=await storage.get("device");
@@ -98,5 +98,30 @@ globalThis.ReaderClient=(()=>{
       throw Error("Project confirmation was not received.");
     return params.get("project");
   }
-  return {connect,pair,disconnect,request,json,trust,access,confirmProject};
+  // Remember only explicitly submitted source identities, not browsing history,
+  // bodies, Reader conversation IDs or authority to append. Re-query the live
+  // server binding on later visits; never treat this hint as a commit receipt.
+  const sameOwner=(a,b)=>!!a&&!!b&&a.id===b.id&&a.user===b.user&&a.origin===b.origin&&b.origin===READER_ORIGIN;
+  const sourceDigest=async id=>{
+    if(typeof id!=="string"||!/^[\w-]{1,128}$/.test(id))throw Error("Invalid source");
+    return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",enc.encode("Reader source v1\0"+id))),
+      x=>x.toString(16).padStart(2,"0")).join("");
+  };
+  async function rememberedSource(device,id){
+    const key=await sourceDigest(id),{device:now,sourceChecks:saved}=await storage.get(["device","sourceChecks"]);
+    return sameOwner(device,now)&&sameOwner(saved,device)&&Array.isArray(saved.keys)&&saved.keys.includes(key);
+  }
+  async function rememberSources(device,ids){
+    await trust;
+    const keys=[];
+    for(let i=0;i<ids.length;i+=64)keys.push(...await Promise.all(ids.slice(i,i+64).map(sourceDigest)));
+    return navigator.locks.request("reader-device",async()=>{
+      const {device:now,sourceChecks:saved}=await storage.get(["device","sourceChecks"]);
+      if(!sameOwner(device,now))throw Error("owner-changed");
+      const all=new Set(sameOwner(saved,device)&&Array.isArray(saved.keys)?saved.keys.filter(k=>/^[a-f0-9]{64}$/.test(k)):[]);
+      for(const key of keys)all.add(key);
+      await storage.set({sourceChecks:{id:device.id,user:device.user,origin:device.origin,keys:[...all]}});
+    });
+  }
+  return {connect,pair,disconnect,request,json,trust,access,confirmProject,rememberSources,rememberedSource};
 })();

@@ -4,6 +4,11 @@ globalThis.ReaderPageIndex = (() => {
   const mounted=source.mounted, surface=source.surface;
   const tidy=s=>(s||"").replace(/\s+/g," ").trim();
   const headingSelector="h1,h2,h3,h4,h5,h6,[role=heading],[data-heading-level]";
+  const headingChrome=".sr-only,pre,code,button,nav,form,table,figure,figcaption,summary,[role=dialog],[role=toolbar],[role=menu],[role=tablist],[role=button],[role=tooltip],[data-conversation-role]";
+  // HTML heading tags also style statistic cards. A standalone measurement is
+  // not a chapter; numbering followed by meaningful prose remains eligible.
+  const statistic=/^[+\-−~≈<>≤≥]?\s*[$€£¥]?\s*\d+(?:[.,，\s]\d+)*(?:\s*(?:%|‰|[KMGTPE]?i?B|bytes?|[kMGT]?Hz|ms|[μµu]?s|min|h|[kcmµμ]?m(?:[²³]|\/s)?|[kmgµμ]+|[kM]?W|[kM]?J|°[CF]?|个|次|条|轮|项|秒|分钟|小时|天|万|亿|千|百))?$/iu;
+  const chapterText=text=>!!text&&!statistic.test(text);
   function headingLevel(el){
     if(/^H[1-6]$/.test(el.tagName))return Number(el.tagName[1]);
     const level=el.getAttribute("data-heading-level")??(el.getAttribute("role")==="heading"?(el.getAttribute("aria-level")??"2"):null);
@@ -12,8 +17,8 @@ globalThis.ReaderPageIndex = (() => {
   // Explicit heading semantics are structural evidence; ordinary bold text and
   // screen-reader conversation-role labels are not answer chapters.
   const titles=el=>[...surface(el).querySelectorAll(headingSelector)]
-    .filter(n=>headingLevel(n)&&!n.matches("[data-conversation-role]")&&!n.closest(".sr-only,pre,code,button,nav")&&source.visible(n)&&
-      !n.querySelector(headingSelector)&&tidy(n.textContent)&&n.getClientRects().length);
+    .filter(n=>headingLevel(n)&&!n.closest(headingChrome)&&source.visible(n)&&
+      !n.querySelector(headingSelector)&&chapterText(tidy(n.textContent))&&n.getClientRects().length);
   const fileName=el=>tidy(el.getAttribute("data-file-name")||el.getAttribute("download")||el.getAttribute("alt")||el.textContent);
   function fileNodes(el){
     const result=new Set();
@@ -47,7 +52,7 @@ globalThis.ReaderPageIndex = (() => {
         const text=tidy(value.replace(/\[([^\]]+)\]\([^)]*\)/g,"$1")
           .replace(/(`+)(.+?)\1|(\*{1,3})(\S(?:.*?\S)?)\3|(?<![\p{L}\p{N}_])(_{1,3})(\S(?:.*?\S)?)\5(?![\p{L}\p{N}_])/gu,
             (_all,_ticks,code,_stars,emphasis,_underscores,word)=>code??emphasis??word));
-        result.push({level:h?h[1].length:setext[1][0]==="="?1:2,text});
+        if(chapterText(text))result.push({level:h?h[1].length:setext[1][0]==="="?1:2,text});
         if(setext)i++;
       }
     }return result;
@@ -212,8 +217,8 @@ globalThis.ReaderPageIndex = (() => {
       if(n===root||/auto|scroll|hidden|clip/.test(style.overflowX)){view.left=Math.max(view.left,r.left);view.right=Math.min(view.right,r.right);}
     }
     const composer=source.composer();
-    const bottom=composer?.getBoundingClientRect().top;
-    return {...view,top:view.top+12,bottom:Math.min(view.bottom,bottom>view.top+80?bottom:view.bottom)-12};
+    const bottom=[composer,composer?.closest("form")].filter(Boolean).map(n=>n.getBoundingClientRect().top).filter(y=>y>view.top+80);
+    return {...view,top:view.top+12,bottom:Math.min(view.bottom,...bottom)-12};
   }
   // Keep the literal UTF-16 offsets returned by RegExp; lowercasing a string can
   // change its length (e.g. dotted I), which would select the wrong DOM bytes.
@@ -280,7 +285,7 @@ globalThis.ReaderPageIndex = (() => {
         const match=textTarget(msg,row,{query:h.text,occurrence:0});if(!match)return null;
         const block=match.node.closest("p,li,div,dt,figcaption");
         if(!block||!msg.contains(block)||tidy(block.textContent)!==h.text||
-          block.closest(`${headingSelector},pre,code,button,nav,.sr-only`)||block.querySelector(`${headingSelector},pre,code,button,nav,.sr-only,[hidden],[aria-hidden=true]`)||
+          !chapterText(h.text)||block.closest(`${headingSelector},${headingChrome}`)||block.querySelector(`${headingSelector},${headingChrome},[hidden],[aria-hidden=true]`)||
           !block.contains(match.range.endContainer))return null;
         const rendered=matches(textMap(surface(msg)).text,h.text);rendered.next();if(!rendered.next().done)return null;
         return {...match,kind:"heading-text",rect:()=>[...match.range.getClientRects()].find(r=>r.width&&r.height)||match.range.getBoundingClientRect()};
@@ -316,6 +321,43 @@ globalThis.ReaderPageIndex = (() => {
   function aligned(root,top,view,{start,extent}=axis(root)){
     return Math.max(start,Math.min(start+extent,root.scrollTop+top-view.top));
   }
+  function readingLine(view,r){
+    const room=Math.max(0,view.bottom-view.top);
+    // Leave a visible beginning plus context above the composer. Tall answers
+    // expose their opening rather than aligning their offscreen bottom.
+    const reserve=Math.min(room,Math.max(room*.25,Math.min(r.height,96)+16));
+    return view.bottom-reserve;
+  }
+  let releaseFocus;
+  function clearFocus(){releaseFocus?.();}
+  function focusLanding(msg,r,view,signal){
+    clearFocus();
+    const top=Math.max(r.top,view.top),left=Math.max(r.left,view.left),bottom=Math.min(r.bottom,view.bottom,top+120),right=Math.min(r.right,view.right);
+    if(bottom<=top||right<=left)return;
+    const host=document.createElement("div");host.dataset.readerNavigationFocus="";
+    host.setAttribute("aria-hidden","true");
+    const shadow=host.attachShadow({mode:"closed"}),style=document.createElement("style"),mark=document.createElement("div");
+    // Isolated decoration, not a wrapper/style/class on ChatGPT's transcript.
+    style.textContent=`:host{all:initial!important;position:fixed!important;inset:0!important;pointer-events:none!important;z-index:10009!important}
+      div{position:absolute;box-sizing:border-box;border:2px solid #087a68;border-radius:5px;background:#087a6814;pointer-events:none}
+      @media(prefers-color-scheme:dark){div{border-color:#94d9c4;background:#94d9c414}}`;
+    Object.assign(mark.style,{top:top+"px",left:left+"px",width:(right-left)+"px",height:(bottom-top)+"px"});
+    shadow.append(style,mark);
+    let timer;const observer=new MutationObserver(()=>clear());
+    const clear=()=>{
+      clearTimeout(timer);observer.disconnect();host.remove();
+      for(const name of ["scroll","resize","popstate","pagehide"])removeEventListener(name,clear,true);
+      globalThis.visualViewport?.removeEventListener?.("resize",clear);
+      globalThis.visualViewport?.removeEventListener?.("scroll",clear);
+      signal?.removeEventListener("abort",clear);
+      if(releaseFocus===clear)releaseFocus=null;
+    };
+    releaseFocus=clear;document.documentElement.append(host);observer.observe(msg,{subtree:true,childList:true,characterData:true,attributes:true});
+    for(const name of ["scroll","resize","popstate","pagehide"])addEventListener(name,clear,{capture:true,passive:true});
+    globalThis.visualViewport?.addEventListener?.("resize",clear);globalThis.visualViewport?.addEventListener?.("scroll",clear);
+    signal?.addEventListener("abort",clear,{once:true});
+    timer=setTimeout(clear,1800);
+  }
   function outerAdjustment(root){
     const chain=[root];
     for(let n=root;n&&n!==document.scrollingElement;){
@@ -339,6 +381,7 @@ globalThis.ReaderPageIndex = (() => {
     return !x&&!y||!!x&&!!y&&["startContainer","endContainer","startOffset","endOffset"].every(k=>x[k]===y[k]);
   }
   async function jump(rows,target,signal,report=()=>{},targetBody){
+    clearFocus();
     signal?.throwIfAborted();
     const path=location.pathname,version=sample(),order=new Map(rows.map((r,i)=>[r.id,i])),index=order.get(target.id);
     const fail=reason=>({ok:false,reason});
@@ -387,7 +430,7 @@ globalThis.ReaderPageIndex = (() => {
           if(!dest||!msg.contains(dest.node)||!source.visible(dest.node)){previous=null;stable=0;await pause();continue;}
           const r=dest.rect();
           if(!(r?.width>0&&r.height>0)){previous=null;stable=0;await pause();continue;}
-          const next=aligned(root,r.top,view,bounds);
+          const next=aligned(root,r.top,{...view,top:readingLine(view,r)},bounds);
           if(Math.abs(next-root.scrollTop)>1){
             check();root.scrollTo({top:next,behavior:"instant"});stable=0;previous=null;
           }else{
@@ -396,7 +439,11 @@ globalThis.ReaderPageIndex = (() => {
             const current={msg,root,dest,r,view,offset:root.scrollTop};
             stable=inside(r,view)&&sameLanding(previous,current)?stable+1:0;
             previous=current;
-            if(stable>=4){check();return {ok:true,kind:dest.kind,probes};}
+            if(stable>=4){
+              check();
+              try{focusLanding(msg,r,view,signal);}catch{clearFocus();} // Decoration cannot certify or invalidate a location.
+              return {ok:true,kind:dest.kind,probes};
+            }
           }
         }else{
           previous=null;stable=0;lastReason="unmounted";
@@ -484,5 +531,5 @@ globalThis.ReaderPageIndex = (() => {
     }
     listener(layout());update();return ()=>layoutListeners.delete(listener);
   }
-  return {mounted,idOf,domRows,domBody,fromBranch,metadata,mergeMounted,sections,tree,search,leaf,sample,revision:()=>revision,visible,currentSection,jump,matches,textTarget,destination,layout,observeLayout,generating};
+  return {mounted,idOf,domRows,domBody,fromBranch,metadata,mergeMounted,sections,tree,search,leaf,sample,revision:()=>revision,visible,currentSection,jump,clearFocus,matches,textTarget,destination,layout,observeLayout,generating};
 })();

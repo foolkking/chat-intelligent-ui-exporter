@@ -125,6 +125,37 @@ test("message success requires a stable, identified and actually visible destina
     const rect=msg.getBoundingClientRect();assert.ok(rect.top>=11&&rect.bottom<700);
   }finally{f.close();}
 });
+test("verified lower landing stays above the composer and adds an isolated, non-scrolling focus cue",async()=>{
+  const f=fixture();try{
+    const root=f.root(),msg=f.message(root,"a",1500,'<h2 data-offset="220">Target</h2>'),rows=f.rows();
+    rows[0].headings=[{text:"Target",level:2}];f.verify(rows);
+    const form=f.doc.createElement("form"),composer=f.doc.createElement("div");composer.id="prompt-textarea";
+    composer.dataset.offset="610";form.append(composer);f.doc.body.append(form);
+    const version=f.index.sample(),body=msg.outerHTML,focus=f.doc.activeElement;
+    const result=await locate(f,rows,{id:"a",heading:0});assert.equal(result.ok,true);
+    const rect=msg.firstElementChild.getBoundingClientRect();assert.equal(rect.top,451.5);assert.ok(rect.bottom<598);
+    const cue=f.doc.querySelector("[data-reader-navigation-focus]");assert.ok(cue);assert.equal(cue.getAttribute("aria-hidden"),"true");
+    assert.equal(cue.shadowRoot,null,"closed shadow decoration must not copy transcript text");
+    assert.equal(msg.outerHTML,body);assert.equal(f.index.sample(),version);assert.equal(f.doc.activeElement,focus);
+    const writes=f.scrolls.length;
+    root.dispatchEvent(new f.w.Event("scroll",{bubbles:false}));
+    assert.equal(cue.isConnected,false);assert.equal(f.scrolls.length,writes);
+  }finally{f.close();}
+});
+test("focus is cleared before another jump, on caller cancellation, route changes and transcript edits",async()=>{
+  for(const change of ["cancel","route","edit","next"]){
+    const f=fixture();try{
+      const root=f.root(),msg=f.message(root,"a",1000),rows=f.rows(),ctl=new AbortController();f.verify(rows);
+      assert.equal((await locate(f,rows,{id:"a"},ctl)).ok,true);
+      assert.ok(f.doc.querySelector("[data-reader-navigation-focus]"));
+      if(change==="cancel")ctl.abort();
+      if(change==="route")f.w.dispatchEvent(new f.w.PopStateEvent("popstate"));
+      if(change==="edit"){msg.firstElementChild.textContent="Edited";await Promise.resolve();}
+      if(change==="next")assert.equal((await locate(f,rows,{id:"missing"})).ok,false);
+      assert.equal(f.doc.querySelector("[data-reader-navigation-focus]"),null,change);
+    }finally{f.close();}
+  }
+});
 test("a replacement scroll root is resolved again while the same target remains mounted",async()=>{
   const f=fixture();try{
     const old=f.root(),msg=f.message(old,"a",900),rows=f.rows();f.verify(rows);let next;
@@ -203,9 +234,9 @@ test("the final awaited frame must revalidate exact heading visibility, not just
 test("geometry moved on the success frame must be stabilized again",async()=>{
   const f=fixture();try{
     const root=f.root(),msg=f.message(root,"a",12),rows=f.rows();f.verify(rows);
-    f.hooks.set(8,()=>{msg.dataset.y="350";});
+    f.hooks.set(8,()=>{msg.dataset.y="1000";});
     const result=await locate(f,rows);assert.equal(result.ok,true);assert.ok(f.frame>8);
-    assert.ok(msg.getBoundingClientRect().top<=13,"Do not accept an in-view but still moving target.");
+    assert.ok(Math.abs(msg.getBoundingClientRect().top-519)<=1,"Re-establish the new lower reading line after motion; merely in-view is insufficient.");
   }finally{f.close();}
 });
 test("same-ID concurrent visible nodes are ambiguous, never first-match success",async()=>{

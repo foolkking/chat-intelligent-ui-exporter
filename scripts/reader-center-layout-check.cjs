@@ -26,16 +26,18 @@ const check=(name,value)=>{report.checks.push({name,pass:!!value});assert(value,
   await page.goto(target.url().replace(/background\.js$/,"center.html?tab=999999"));
   await (await page.$("#source-file")).uploadFile(source);await page.waitForFunction(()=>!document.querySelector("#selection-step").hidden);
   check("source reads show zero initial selection",await page.$$eval("#source-rows input:checked",x=>x.length===0));
-  await page.click("#selection-more summary");
-  await page.click("#select-page");check("page select fixes exactly 50",await page.$eval("#selected-count",e=>e.textContent.includes("50")));
+  await page.click('#project-groups li[data-group="project:project-0"] input');
+  check("first project fixes exactly 50",await page.$eval("#selected-count",e=>e.textContent.includes("50")));
   await page.click("#source-more");check("next page keeps exactly 50 DOM rows",await page.$$eval("#source-rows li",x=>x.length===50));
-  await page.click("#select-page");check("cross-page selection retains 100",await page.$eval("#selected-count",e=>e.textContent.includes("100")));
-  await page.select("#selection-view","selected");await page.click("#source-rows input");
+  await page.click('#project-groups li[data-group="project:project-1"] input');
+  check("cross-project selection retains 100",await page.$eval("#selected-count",e=>e.textContent.includes("100")));
+  await page.click("#selected-count");await page.click("#source-rows input");
   check("selected view removes one selected reference",await page.$eval("#selected-count",e=>e.textContent.includes("99")));
-  await page.select("#selection-view","all");await page.click('#project-groups button[data-group="project:project-2"]');
-  check("only proven local project permits whole-export project action",await page.$eval("#select-project",e=>!e.disabled&&!e.hidden));
-  await page.click("#select-project");check("whole-export project preserves prior selections and fixes 149 IDs",await page.$eval("#selected-count",e=>e.textContent.includes("149")));
-  await page.click("#selection-more summary");
+  await page.click("#selected-count");await page.click('#project-groups button[data-group="project:project-2"]');
+  check("project select remains on the right",await page.$eval('#project-groups li[data-group="project:project-2"] .project-line',
+    e=>e.lastElementChild.className==="project-select"));
+  await page.click('#project-groups li[data-group="project:project-2"] input');
+  check("local project preserves prior selections and fixes 149 IDs",await page.$eval("#selected-count",e=>e.textContent.includes("149")));
   for(const width of [1280,375,320]){
     await page.setViewport({width,height:width===1280?900:800});
     const g=await page.evaluate(()=>{const r=document.querySelector("#to-target").getBoundingClientRect(),list=document.querySelector("#source-rows");

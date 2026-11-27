@@ -143,6 +143,7 @@ test("without a retained local receipt, source status looks up only the open Cha
       },
       ReaderClient:{
         trust:Promise.resolve(),
+        rememberedSource:async()=>false,
         json:(method,body)=>({method,body:JSON.stringify(body)}),
         request:async(deviceId,path,options)=>{
           requests.push({deviceId,path,options});
@@ -199,7 +200,8 @@ test("without a retained local receipt, source status looks up only the open Cha
 });
 test("changing the configured Reader origin forgets only the old device data, without any network request",async()=>{
   const vm=require("node:vm"),device={id:"fixture-device",origin:"https://previous.example.test"};
-  const local={device,jobs:[{}],destination:{},exportJob:{},seenWarnings:["seen"],sourceLookupDevice:device.id,unrelated:"keep"};
+  const local={device,jobs:[{}],destination:{},exportJob:{},seenWarnings:["seen"],sourceLookupDevice:device.id,
+    sourceChecks:{...device,keys:["a".repeat(64)]},unrelated:"keep"};
   const session={access:{},pending:{}};let requests=0,restricted=0;
   const store=obj=>({setAccessLevel:async o=>{assert.equal(o.accessLevel,"TRUSTED_CONTEXTS");restricted++;},
     async get(k){return {[k]:obj[k]};},async remove(keys){for(const k of keys)delete obj[k];},
@@ -218,7 +220,7 @@ test("source task display is attempt/account scoped and an extended append ticke
     chrome:{runtime:{onConnect:{addListener(){}}},storage:{
       local:{get:async()=>local},session:{get:async()=>sessions,set:async items=>Object.assign(sessions,items),remove:async key=>{delete sessions[key];}}},
       tabs:{onActivated:{addListener(){}},create:async details=>opened.push(details)}},
-    ReaderClient:{trust:Promise.resolve(),request:async(_id,path)=>({json:async()=>path==="capabilities"?
+    ReaderClient:{trust:Promise.resolve(),rememberSources:async()=>{},rememberedSource:async()=>false,request:async(_id,path)=>({json:async()=>path==="capabilities"?
       {protocol:1,import_profile:"reader-chat-v1",capture:true,resumable_capture:true,selective_append:true,selective_append_ranges:extended}:
       {...receipt,conversation_id:"00000000-0000-4000-8000-000000000099"}})}});
   for(const file of ["progress.js","source-actions.js"])vm.runInContext(fs.readFileSync(path.join(__dirname,"../reader",file),"utf8"),env);

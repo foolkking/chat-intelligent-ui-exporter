@@ -25,7 +25,7 @@ $("import-center").onclick=()=>chrome.runtime.sendMessage({kind:"open-center"});
 setText("history-heading","最近任务","Recent tasks");setText("history-link","最近任务","Recent tasks");
 setText("disconnect","断开此设备","Disconnect this device");setText("target-label","新对话保存到","Save new conversations to");
 setText("share-label-copy","在 ChatGPT 页内显示此项目名称","Show this project name on the ChatGPT page");
-setText("source-lookup-copy","打开 ChatGPT 对话时，将当前对话标识发给 Reader 以查找已存版本","When I open a ChatGPT chat, send its ID to Reader to find a saved version");
+setText("source-lookup-copy","也自动查找其他对话的已存版本（向 Reader 发送对话标识）","Also check other chats for saved versions (send their IDs to Reader)");
 setText("choose","确认","Confirm");setText("destination-needed","选择新对话的保存位置","Choose where new conversations are saved");
 setText("boot-retry","重新读取资料","Retry loading library");
 setText("more","加载更多","Load more");$("instance").textContent=READER_ORIGIN;
@@ -71,9 +71,9 @@ function dateLabel(value){
     new Intl.DateTimeFormat(zh?"zh-CN":"en",{...(now.getFullYear()!==d.getFullYear()?{year:"numeric"}:{}),month:"short",day:"numeric"}).format(d);
   const t=node("time","",text);t.dateTime=d.toISOString();t.title=d.toLocaleString();return t;
 }
-const projectName=s=>s?.state==="unclassified"?L("未归类","Unclassified"):s?.state==="project"?
+const projectName=s=>s?.state==="unclassified"?L("未分类","Unclassified"):s?.state==="project"?
   ReaderRoutes.projectName(s.name,s.id)||L("项目名称未知","Project name unavailable"):L("项目不可用","Project unavailable");
-const pOptions=(f,all)=>{f.replaceChildren(...(all?[opt("",L("所有项目","All projects")),opt("unclassified",L("未归类","Unclassified"))]:[opt("",L("未归类","Unclassified"))]),
+const pOptions=(f,all)=>{f.replaceChildren(...(all?[opt("",L("所有项目","All projects")),opt("unclassified",L("未分类","Unclassified"))]:[opt("",L("未分类","Unclassified"))]),
   ...projects.filter(p=>!p.default).map((p,i)=>opt(p.id,ReaderRoutes.projectName(p.name,p.id)||L(`名称未知的项目 ${i+1}`,`Unnamed project ${i+1}`))));};
 function focus(el){if(el?.isConnected&&!el.hidden)el.focus({preventScroll:true});}
 function closeMenu(restore=false){const m=$("row-menu");if(m.matches(":popover-open"))m.hidePopover();menuOwner?.setAttribute("aria-expanded","false");if(restore)focus(menuOwner);}
@@ -142,7 +142,7 @@ function row(item){
   const title=item.title||L("无标题对话","Untitled conversation"),name=node("span","name");
   name.append(lead,title);if(item.pinned)name.append(node("span","sr",L("（已置顶）"," (pinned)")));copy.append(name,meta);
   const pname=item.project_unavailable?L("项目不可用","Project unavailable"):ReaderRoutes.projectName(item.project_name,item.project_id)||
-    (item.project_id?projectName({state:"project",id:item.project_id,name:projects.find(p=>p.id===item.project_id)?.name}):L("未归类","Unclassified"));
+    (item.project_id?projectName({state:"project",id:item.project_id,name:projects.find(p=>p.id===item.project_id)?.name}):L("未分类","Unclassified"));
   const filter=$("filter").value;
   if(item.project_unavailable||!filter||filter!==(item.project_id||"unclassified")){
     const p=node("span","project",pname);p.title=pname;meta.append(p);

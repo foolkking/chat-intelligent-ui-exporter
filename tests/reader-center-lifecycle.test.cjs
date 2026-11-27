@@ -19,7 +19,7 @@ async function fixture({plan=old,jobs=[],shared,search="",tabs=[],rows=[{id:"one
   shared||={changes:[],locks:new Map(),state:{device:structuredClone(device),batchPlan:structuredClone(plan),jobs:structuredClone(jobs)}};
   const {changes,locks,state}=shared;
   const clone=x=>x===undefined?undefined:structuredClone(x);
-  const backend={projects:clone(projects),sourceLookup,webCreate,status:async()=>({}),discover:async()=>clone(web)};
+  const backend={projects:clone(projects),sourceLookup,webCreate,status:async()=>({conversation_id:null}),discover:async()=>clone(web)};
   const storage={
     async get(keys){return Object.fromEntries((typeof keys==="string"?[keys]:keys).map(k=>[k,clone(state[k])]))},
     async set(patch){const c={};for(const [k,v] of Object.entries(patch)){c[k]={oldValue:clone(state[k]),newValue:clone(v)};state[k]=clone(v);}
@@ -40,7 +40,8 @@ async function fixture({plan=old,jobs=[],shared,search="",tabs=[],rows=[{id:"one
   w.ReaderLocalArchive={open:async()=>({digest:"same-source",rows:clone(rows),...archive,
     build:async(...args)=>{calls.push("build");return archive.build ? archive.build(...args) :
       {file:{size:10},sha256:"a".repeat(64),partial:false,losses:{}};}})};
-  w.ReaderClient={trust:Promise.resolve(),confirmProject:(d,name)=>backend.confirmProject(d,name),request:async(_d,p,opts={})=>{
+  w.ReaderClient={trust:Promise.resolve(),rememberSources:async(d,ids)=>{assert.equal(d.id,state.device.id);state.rememberedSources=Array.from(ids);},
+    confirmProject:(d,name)=>backend.confirmProject(d,name),request:async(_d,p,opts={})=>{
     calls.push(p);requests.push({device:_d,path:p,method:opts.method||"GET",body:opts.body});
     return {json:async()=>p==="capabilities"?{protocol:1,import_profile:"reader-chat-v1",capture:true,resumable_capture:true,source_lookup:backend.sourceLookup,web_import_project:backend.webCreate}:
       p==="projects"?clone(backend.projects):p==="sources/status"?backend.status(_d,JSON.parse(opts.body)):p.startsWith("requests/")?{id:null}:{}};
@@ -327,9 +328,11 @@ test("same-name reuse and explicitly named creation freeze only the verified Rea
       if(m.kind==="panel-host")await f.storage.set({jobs:f.state.jobs.map(j=>j.key===m.key?{...j,iid,active:false,packageReady:false,phase:"done"}:j)});
       return response;
     };
-    doc.querySelector("#remember-mapping").checked=true;await doc.querySelector("#confirm-import").onclick();
+    assert.equal(f.state.batchMappings,undefined,"viewing and editing destinations does not remember them");
+    assert.equal(f.state.rememberedSources,undefined);await doc.querySelector("#confirm-import").onclick();
     assert.deepEqual(f.state.batchPlan.items.map(i=>i.project),[projectA,projectB]);
     assert.deepEqual(f.state.batchMappings[0].targets,{"project:known":projectA,"project:opaque":projectB});
+    assert.deepEqual(f.state.rememberedSources,["first","second"]);
   }finally{f.close();}
 });
 test("unknown create result preserves the draft; a fresh exact-name choice uses the existing project without creating twice",async()=>{
@@ -374,7 +377,7 @@ test("a delayed confirmation cannot select a project after switching Reader acco
       if(change==="account"){
         await f.storage.set({device:{...device,id:projectB,user:"other"}});await until(()=>!doc.querySelector("#confirm-import").disabled);
       }else if(change==="source"){
-        await doc.querySelector("#back-selection").onclick();await doc.querySelector("#back-source").onclick();
+        await stepButton(doc,1).onclick();await doc.querySelector("#back-source").onclick();
         f.w.ReaderLocalArchive.open=async()=>({digest:"different",rows:[{id:"different",title:"Another source",group:"project:known"}]});await f.choose();
       }else selectValue(f.w,"mapping-0",projectB);
       f.backend.projects=projectRows();reply.resolve(projectA);await pending;
@@ -383,20 +386,23 @@ test("a delayed confirmation cannot select a project after switching Reader acco
   }
 });
 
-test("saved-reference lookup requires an explicit click and sends only the selected source ids",async()=>{
+test("entering Reader destination explicitly looks up only selected source ids and labels updates without importing",async()=>{
   const f=await fixture({plan:null,rows:sourceRows(),sourceLookup:true});
   try{
     f.backend.status=async()=>({conversation_id:iid});
-    await f.choose([0,2]);await f.w.document.querySelector("#reload-projects").onclick();
-    assert.equal(f.requests.some(r=>r.path==="sources/status"),false,"reading, selecting and refreshing destinations do not disclose source ids");
+    await f.choose([0,2]);await until(()=>!f.w.document.querySelector("#check-bindings").disabled);
     const button=f.w.document.querySelector("#check-bindings");
     assert.equal(button.hidden,false);assert.equal(button.disabled,false);
-    await button.onclick();
     const sent=f.requests.filter(r=>r.path==="sources/status");
     assert.deepEqual(sent.map(r=>[r.device,r.method,JSON.parse(r.body)]),[
       [device.id,"POST",{source_id:"one"}],[device.id,"POST",{source_id:"three"}]
     ]);
     assert.match(f.w.document.querySelector("#bindings-status").textContent,/Checked 2\/2; 2 saved references/);
+    assert.match(f.w.document.querySelector("#confirm-import").textContent,/Update 2 conversations/);
+    assert.equal(f.state.rememberedSources,undefined);
+    await stepButton(f.w.document,1).onclick();
+    assert.equal(f.w.document.querySelectorAll("#source-rows .meta").length,3);
+    assert.equal([...f.w.document.querySelectorAll("#source-rows .meta")].filter(n=>n.textContent.includes("Update existing")).length,2);
     assert.equal(f.messages.some(m=>["batch-capture","panel-host"].includes(m.kind)),false);
     assert.deepEqual(f.state.jobs,[]);
   }finally{f.close();}
@@ -406,17 +412,19 @@ test("a Reader account change invalidates a held saved-reference response and st
   const f=await fixture({plan:null,rows:sourceRows(),sourceLookup:true}),entered=deferred(),release=deferred();
   let checking;
   try{
-    await f.choose([0,1]);
+    await f.choose([0,1]);await until(()=>!f.w.document.querySelector("#check-bindings").disabled);
+    f.requests.length=0;
     f.backend.status=async()=>{entered.resolve();return release.promise;};
     checking=f.w.document.querySelector("#check-bindings").onclick();
     await entered.promise;
     const other={...device,id:"00000000-0000-4000-8000-000000000013",user:"synthetic-other"};
     await f.storage.set({device:other});
-    await until(()=>f.requests.some(r=>r.device===other.id&&r.path==="projects")&&!f.w.document.querySelector("#confirm-import").disabled);
+    await until(()=>f.requests.some(r=>r.device===other.id&&r.path==="projects"));
     release.resolve({conversation_id:iid});await checking;
     const sent=f.requests.filter(r=>r.path==="sources/status");
     assert.deepEqual(sent.map(r=>[r.device,JSON.parse(r.body)]),[[device.id,{source_id:"one"}]]);
-    assert.equal(f.w.document.querySelector("#bindings-status").textContent,"","the old account's response must not appear in the new account");
+    await until(()=>!f.w.document.querySelector("#check-bindings").disabled);
+    assert.equal(f.w.document.querySelector("#bindings-status").textContent,"","old results cannot certify the new account; no automatic disclosure to the replacement account");
     assert.equal(f.messages.some(m=>["batch-capture","panel-host"].includes(m.kind)),false);
     assert.deepEqual(f.state.jobs,[]);
   }finally{release.resolve({conversation_id:iid});await checking?.catch(()=>{});f.close();}
@@ -442,7 +450,7 @@ test("a deleted Reader destination blocks confirmation instead of silently falli
   }finally{f.close();}
 });
 
-test("refreshing Reader projects preserves the current per-project mapping, attachment choice and remember choice",async()=>{
+test("refreshing Reader projects preserves the current per-project mapping and attachment choice without saving the draft",async()=>{
   const rows=[{id:"one",title:"One",group:"project:source-a"},{id:"two",title:"Two",group:"project:source-b"}];
   const f=await fixture({plan:null,rows,projects:projectRows()});
   try{
@@ -450,7 +458,6 @@ test("refreshing Reader projects preserves the current per-project mapping, atta
     assert.equal(f.w.document.querySelector("#target-mode").value,"groups");
     selectValue(f.w,"mapping-0",projectA);selectValue(f.w,"mapping-1",projectB);
     f.w.document.querySelector("#include-files").checked=false;
-    f.w.document.querySelector("#remember-mapping").checked=true;
     // A changed default or stored mapping is not permission to erase this view's
     // already reviewed choices during a catalogue refresh.
     await f.storage.set({destination:{device:device.id,project:projectB,textOnly:false},
@@ -463,7 +470,8 @@ test("refreshing Reader projects preserves the current per-project mapping, atta
     assert.match(f.w.document.querySelector("#mapping-1").selectedOptions[0].textContent,/B renamed/);
     assert.equal(f.w.document.querySelector("#target-mode").value,"groups");
     assert.equal(f.w.document.querySelector("#include-files").checked,false);
-    assert.equal(f.w.document.querySelector("#remember-mapping").checked,true);
+    assert.equal(f.w.document.querySelector("#remember-mapping"),null,"remembering happens only on explicit submission");
+    assert.equal(f.state.rememberedSources,undefined);
     assert.equal(f.w.document.querySelector("#confirm-import").disabled,false);
     assert.equal(f.state.batchPlan,null);assert.deepEqual(f.state.jobs,[]);
     assert.equal(f.requests.some(r=>r.method!=="GET"),false);
@@ -471,20 +479,19 @@ test("refreshing Reader projects preserves the current per-project mapping, atta
   }finally{f.close();}
 });
 
-test("embedded import uses the claimed tab hint, suppresses duplicate header and switches library by message only",async()=>{
+test("embedded import uses the claimed tab hint and leaves library navigation to the outer workspace",async()=>{
   const f=await fixture({frame:{view:"import",tab:17},search:"?tab=8",tabs:[{id:8,title:"Query tab"},{id:17,title:"Bound tab"}]});
   try{
     const doc=f.w.document,link=doc.querySelector("#library-link");
     assert.equal(doc.querySelector(".center-head").hidden,true);
-    assert.equal(link.closest("[hidden]"),null,"the existing library action remains discoverable");
+    assert.equal(link.closest("[hidden]"),doc.querySelector(".center-head"),"no duplicate library action inside the import step bar");
     assert.deepEqual(f.messages,[],"embedding still does not auto-discover a source or query Reader");
-    await link.onclick();
-    assert.deepEqual(f.messages,[{kind:"frame-view",view:"library"}]);assert.deepEqual(f.created,[]);
+    assert.deepEqual(f.created,[]);
     await doc.querySelector("#web-source").onclick();
     assert.match(doc.querySelector("#web-tabs button").textContent,/Bound tab.*Opened from this tab/);
     assert.equal(f.messages.some(m=>m.kind==="batch-discover"),false);
     await doc.querySelector("#resume-plan").onclick();
-    assert.equal(link.closest("[hidden]"),null,"step transitions retain the same library action");
+    assert.equal(link.closest("[hidden]"),doc.querySelector(".center-head"),"step transitions must not restore the removed link");
     assert.equal(link.isConnected,true);
   }finally{f.close();}
 });
@@ -505,7 +512,8 @@ test("switching an embedded import to library and hiding it does not interrupt a
     Object.defineProperty(input,"files",{value:[{name:"synthetic.zip"}],configurable:true});await input.onchange();
     let finished=false;run=doc.querySelector("#continue-queue").onclick().then(()=>{finished=true;});
     await until(()=>f.calls.includes("wake"));
-    await doc.querySelector("#library-link").onclick();
+    // The outer workspace switches its retained iframe; the embedded step bar
+    // deliberately no longer duplicates that library control.
     Object.defineProperty(doc,"visibilityState",{value:"hidden",configurable:true});
     doc.dispatchEvent(new f.w.Event("visibilitychange"));await sleep(80);
     assert.equal(finished,false);assert.equal(f.state.batchPlan.id,old.id);
@@ -528,6 +536,7 @@ async function openWeb(f){
   assert.equal(doc.querySelector("#selection-step").hidden,false);return doc;
 }
 function groupButton(doc,group){return [...doc.querySelectorAll("#project-groups button[data-group]")].find(n=>n.dataset.group===group);}
+const stepButton=(doc,n)=>doc.querySelector(`#steps button[data-step="${n}"]`);
 function checkRow(doc,index=0){doc.querySelectorAll("#source-rows input")[index].click();}
 test("compact projects collapse separately from selection; expanding to a wide project list retains the exact conversation pane and choice",async()=>{
   const f=await fixture({plan:null,web:webSource(),tabs:[{id:17,title:"Synthetic source"}],wide:false});try{
@@ -546,18 +555,18 @@ test("compact projects collapse separately from selection; expanding to a wide p
 });
 test("current discovered range is tri-state and fixed across pages, same-title groups and review-selected removal",async()=>{
   const f=await fixture({plan:null,web:webSource(),tabs:[{id:17,title:"Synthetic source"}]});try{
-    const doc=await openWeb(f),all=doc.querySelector("#select-visible");
-    assert.equal(all.type,"checkbox");assert.equal(all.checked,false);assert.match(doc.querySelector("#scope-label").textContent,/discovered.*55/);
+    const doc=await openWeb(f),all=doc.querySelector('li[data-group="project:p1"] input');
+    assert.equal(all.type,"checkbox");assert.equal(all.checked,false);assert.match(all.getAttribute("aria-label"),/55 discovered/);
     checkRow(doc);assert.equal(all.indeterminate,true);assert.equal(all.checked,false);
     all.click();assert.match(doc.querySelector("#selected-count").textContent,/55 selected/);
     doc.querySelector("#source-more").click();assert.equal(doc.querySelectorAll("#source-rows input:checked").length,5);
     await groupButton(doc,"project:p0").onclick();checkRow(doc);
     assert.equal(doc.querySelector("#source-group").value,"project:p0","compact project shortcut must follow the selected project");
     assert.match(doc.querySelector("#selected-count").textContent,/56 selected/);
-    selectValue(f.w,"selection-view","selected");assert.equal(doc.querySelectorAll("#source-rows li").length,50);
+    doc.querySelector("#selected-count").click();assert.equal(doc.querySelectorAll("#source-rows li").length,50);
     checkRow(doc);assert.match(doc.querySelector("#selected-count").textContent,/55 selected/);
     assert.equal(doc.querySelectorAll("#source-rows li").length,50);
-    assert.match(doc.querySelector("#source-status").textContent,/partial directory/);
+    assert.match(doc.querySelector("#group-label").textContent,/partial directory/);
     assert.match(doc.querySelector("#saved-state-note").textContent,/not checked/);
     assert.doesNotMatch(doc.querySelector("#selection-step").textContent,/Not imported|未导入/);
   }finally{f.close();}
@@ -566,8 +575,9 @@ test("project checkboxes select only discovered members even for a fabricated co
   const f=await fixture({plan:null,web:webSource(webRows(),{complete:true}),tabs:[{id:17,title:"Synthetic source"}]});try{
     const doc=await openWeb(f),box=doc.querySelector('li[data-group="project:p0"] input');
     assert.ok(box);box.click();assert.match(doc.querySelector("#selected-count").textContent,/55 selected/);
-    assert.equal(doc.querySelector("#select-project").disabled,true);
-    assert.match(doc.querySelector("#source-status").textContent,/partial directory/);
+    assert.equal(doc.querySelector("#select-project"),null,"no control may claim complete web-project selection");
+    assert.match(doc.querySelector("#group-label").textContent,/partial directory/);
+    assert.equal(f.w.ReaderCenterSelection.create({source:f.w.JSON.parse(JSON.stringify({...webSource(webRows(),{complete:true}),kind:"web"}))}).project("project:p0").allowed,false);
     assert.deepEqual(f.requests,[]);assert.equal(f.messages.some(m=>m.kind==="batch-capture"),false);
   }finally{f.close();}
 });
@@ -579,7 +589,7 @@ test("web refresh retains surviving selections but reports missing or reassigned
     await doc.querySelector("#refresh-source").onclick();
     assert.match(doc.querySelector("#selected-count").textContent,/1 selected/);
     assert.match(doc.querySelector("#refresh-status").textContent,/2.*removed/);
-    selectValue(f.w,"selection-view","selected");assert.equal(doc.querySelectorAll("#source-rows li").length,1);
+    doc.querySelector("#selected-count").click();assert.equal(doc.querySelectorAll("#source-rows li").length,1);
     assert.match(doc.querySelector("#source-rows").textContent,/Synthetic 055/);
     assert.deepEqual(f.requests,[]);assert.equal(f.state.batchPlan,null);
   }finally{f.close();}
@@ -605,10 +615,10 @@ test("changing source offers return to the unmodified draft; a late discovery af
   const release=deferred();try{
     const doc=await openWeb(f);checkRow(doc);
     await doc.querySelector("#back-source").onclick();assert.equal(doc.querySelector("#source-step").hidden,false);
-    assert.equal(doc.querySelector("#return-selection").hidden,false);
+    assert.equal(stepButton(doc,1).disabled,false);
     f.backend.discover=()=>release.promise;
     await doc.querySelector("#web-source").onclick();pending=doc.querySelector("#web-tabs button").onclick();
-    await doc.querySelector("#return-selection").onclick();release.resolve(webSource([],{scope:"other"}));await pending;
+    await stepButton(doc,1).onclick();release.resolve(webSource([],{scope:"other"}));await pending;
     assert.equal(doc.querySelector("#selection-step").hidden,false);assert.match(doc.querySelector("#selected-count").textContent,/1 selected/);
     assert.equal(doc.querySelectorAll("#source-rows li").length,50);
   }finally{release.resolve({error:"source-unavailable"});await pending;f.close();}
@@ -634,11 +644,12 @@ test("local export project proof remains explicit and target mappings keep both 
     Object.defineProperty(input,"files",{value:[{name:"synthetic.zip"}],configurable:true});await input.onchange();
     assert.equal(doc.querySelector("#refresh-source").hidden,true);
     await groupButton(doc,"project:a").onclick();
-    assert.equal(doc.querySelector("#select-project").disabled,false);await doc.querySelector("#select-project").onclick();
+    const proof=f.w.ReaderCenterSelection.create({source:f.w.JSON.parse(JSON.stringify({kind:"archive",rows,scope:"b".repeat(64),digest:"b".repeat(64),complete:true}))}).project("project:a");
+    assert.equal(proof.allowed,true);doc.querySelector('li[data-group="project:a"] input').click();
     await groupButton(doc,"project:b").onclick();checkRow(doc);await doc.querySelector("#to-target").onclick();
     selectValue(f.w,"mapping-0",projectA);selectValue(f.w,"mapping-1",projectB);
     doc.querySelector("#include-files").checked=false;
-    await doc.querySelector("#back-selection").onclick();f.resize(true);
+    await stepButton(doc,1).onclick();f.resize(true);
     assert.match(doc.querySelector("#selected-count").textContent,/2 selected/);await doc.querySelector("#to-target").onclick();
     assert.equal(doc.querySelector("#mapping-0").value,projectA);assert.equal(doc.querySelector("#mapping-1").value,projectB);
     assert.equal(doc.querySelector("#include-files").checked,false);assert.equal(f.state.batchPlan,null);
@@ -693,7 +704,7 @@ test("returning to a draft after cancelling its refresh keeps selections but req
   try{
     const doc=await openWeb(f);checkRow(doc);f.backend.discover=()=>release.promise;
     pending=doc.querySelector("#refresh-source").onclick();
-    await doc.querySelector("#back-source").onclick();await doc.querySelector("#return-selection").onclick();
+    await doc.querySelector("#back-source").onclick();await stepButton(doc,1).onclick();
     release.resolve(webSource([]));await pending;
     assert.match(doc.querySelector("#selected-count").textContent,/1 selected/);
     assert.equal(doc.querySelectorAll("#source-rows li").length,50);
@@ -716,5 +727,104 @@ test("resizing the selection keeps focused checkbox and changing pages leaves a 
     await doc.querySelector("#project-prev").onclick();f.resize(false);
     assert.equal(doc.querySelector("#conversation-pane").closest("li").dataset.group,"project:g59");
     assert.equal(doc.querySelector("#source-rows input").checked,true);
+  }finally{f.close();}
+});
+test("clickable steps gate prerequisites, retain the draft and never submit an import",async()=>{
+  const f=await fixture({plan:null,web:webSource(),tabs:[{id:17,title:"Synthetic source"}]});try{
+    const doc=f.w.document;
+    assert.equal(stepButton(doc,0).getAttribute("aria-current"),"step");
+    for(const n of [1,2,3])assert.equal(stepButton(doc,n).disabled,true);
+    await openWeb(f);assert.equal(stepButton(doc,2).disabled,true);
+    checkRow(doc);assert.equal(stepButton(doc,2).disabled,false);
+    await stepButton(doc,2).onclick();
+    assert.equal(doc.querySelector("#target-step").hidden,false);
+    assert.equal(doc.querySelector("#target-mode").closest("#step-tools")?.id,"step-tools");
+    assert.equal(doc.querySelector("#confirm-import").closest(".target-actions")?.className,"target-actions");
+    assert.equal(doc.querySelector("#back-selection"),null);assert.equal(doc.querySelector("#return-selection"),null);
+    await stepButton(doc,0).onclick();await stepButton(doc,1).onclick();
+    assert.equal(doc.querySelector("#source-rows input").checked,true);
+    assert.equal(doc.activeElement,stepButton(doc,1));
+    assert.equal(f.state.batchPlan,null);assert.deepEqual(f.state.jobs,[]);
+    assert.equal(f.calls.some(p=>p==="build"||p==="batch-capture"||p==="panel-host"),false);
+  }finally{f.close();}
+});
+test("compact import header removes the marked block and puts scoped selection on the project right",async()=>{
+  const f=await fixture({plan:null,frame:{view:"import",tab:17},web:webSource(),tabs:[{id:17,title:"Synthetic source"}]});try{
+    const doc=await openWeb(f);
+    for(const id of ["source-label","source-query","selection-view","selection-more","select-visible","source-status","account"])
+      assert.equal(doc.getElementById(id),null,id);
+    assert.equal(doc.querySelector("#library-link").closest("[hidden]")?.className,"center-head");
+    for(const id of ["refresh-source","back-source","selected-count"])
+      assert.equal(doc.getElementById(id).closest("#step-tools")?.id,"step-tools",id);
+    const line=groupButton(doc,"project:p1").parentElement;
+    assert.equal(line.lastElementChild.className,"project-select");
+    checkRow(doc);assert.equal(line.querySelector("input").indeterminate,true);
+    line.querySelector("input").click();assert.equal(line.querySelector("input").checked,true);
+    assert.match(doc.querySelector("#selected-count").textContent,/55 selected/);
+    assert.match(doc.querySelector("#group-label").textContent,/partial directory/);
+    doc.querySelector("#selected-count").click();
+    assert.equal(doc.querySelector("#selected-count").getAttribute("aria-pressed"),"true");
+    assert.equal(doc.querySelectorAll("#source-rows li").length,50);
+    checkRow(doc);assert.match(doc.querySelector("#selected-count").textContent,/54 selected/);
+  }finally{f.close();}
+});
+test("a late lookup after step navigation cannot update the previous target or create remembered mappings",async()=>{
+  const f=await fixture({plan:null,rows:sourceRows(),sourceLookup:true}),reply=deferred(),entered=deferred();let pending;
+  try{
+    await f.choose([0]);await until(()=>!f.w.document.querySelector("#check-bindings").disabled);
+    const doc=f.w.document;await stepButton(doc,1).onclick();
+    f.backend.status=async()=>{entered.resolve();return reply.promise;};
+    pending=stepButton(doc,2).onclick();await entered.promise;await stepButton(doc,1).onclick();
+    reply.resolve({conversation_id:iid});await pending;
+    assert.equal(doc.querySelector("#selection-step").hidden,false);assert.equal(doc.querySelector("#source-rows input").checked,true);
+    assert.doesNotMatch(doc.querySelector("#source-rows .meta").textContent,/Update existing/);
+    assert.equal(f.state.batchPlan,null);assert.equal(f.state.batchMappings,undefined);assert.equal(f.state.rememberedSources,undefined);
+    assert.equal(doc.querySelector("#error").textContent,"");
+  }finally{reply.resolve({conversation_id:iid});await pending;f.close();}
+});
+test("updates retain the original project without requiring a stale new-import destination",async()=>{
+  const f=await fixture({plan:null,rows:sourceRows(),sourceLookup:true,projects:projectRows()});try{
+    const doc=f.w.document;
+    await f.storage.set({batchMappings:[{origin:device.origin,user:device.user,source:"same-source",targets:{unknown:projectA}}]});
+    f.backend.status=async()=>({conversation_id:iid});
+    await f.choose([0]);await until(()=>!doc.querySelector("#check-bindings").disabled);
+    assert.equal(doc.querySelectorAll("#target-mappings .mapping-row").length,0);
+    assert.match(doc.querySelector("#confirm-import").textContent,/Update 1/);
+    f.backend.projects=[];await doc.querySelector("#reload-projects").onclick();
+    assert.equal(doc.querySelector("#confirm-import").disabled,false);
+    const send=f.w.chrome.runtime.sendMessage;
+    f.w.chrome.runtime.sendMessage=async m=>{
+      const r=await send(m);
+      if(m.kind==="panel-host")await f.storage.set({jobs:f.state.jobs.map(j=>({...j,iid,active:false,packageReady:false,phase:"done"}))});
+      return r;
+    };
+    await doc.querySelector("#confirm-import").onclick();
+    assert.equal(f.state.batchPlan.items[0].project,null,"no new-project retargeting is encoded for a verified existing group");
+    assert.deepEqual(f.state.batchMappings[0].targets,{unknown:projectA},"update is not a new destination choice");
+    assert.deepEqual(f.state.rememberedSources,["one"]);
+  }finally{f.close();}
+});
+test("opening task step is read-only; the running queue blocks draft navigation without overwriting its plan",async()=>{
+  const job={device:device.id,key,active:true,phase:"reading",local:true,batch:old.id},f=await fixture({jobs:[job]});let run;
+  try{
+    await f.choose();const doc=f.w.document;f.calls.length=0;
+    await stepButton(doc,3).onclick();
+    assert.equal(f.calls.includes("wake"),false,"opening task results is not resuming a queue");
+    run=doc.querySelector("#continue-queue").onclick();await until(()=>f.calls.includes("wake"));await sleep(30);
+    for(const n of [0,1,2]){assert.equal(stepButton(doc,n).disabled,true);await stepButton(doc,n).onclick();}
+    assert.equal(doc.querySelector("#tasks-step").hidden,false);assert.equal(f.state.batchPlan.id,old.id);
+    await f.storage.set({jobs:[{...job,iid,active:false,phase:"done"}]});await run;
+    assert.equal(stepButton(doc,0).disabled,false);assert.equal(stepButton(doc,1).disabled,false);
+    assert.equal(f.calls.includes("build"),false);
+  }finally{if(run){await f.storage.set({jobs:[{...job,iid,active:false,phase:"done"}]});await run;}f.close();}
+});
+test("a memory-write failure after accepting a plan leaves the task recoverable, not a duplicate confirmation form",async()=>{
+  const f=await fixture({plan:null});try{
+    await f.choose();f.w.ReaderClient.rememberSources=async()=>{throw Error("storage-full");};
+    await f.w.document.querySelector("#confirm-import").onclick();
+    assert.equal(f.w.document.querySelector("#tasks-step").hidden,false);
+    assert.equal(f.state.batchPlan.items.length,1);assert.equal(f.state.batchPlan.items[0].id,"one");
+    assert.equal(f.calls.includes("build"),false);assert.match(f.w.document.querySelector("#error").textContent,/temporary storage/);
+    assert.equal(f.w.document.querySelector("#continue-queue").disabled,false);
   }finally{f.close();}
 });

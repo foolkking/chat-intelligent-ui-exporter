@@ -110,10 +110,11 @@ globalThis.ReaderSourceControl=({pathId,capture,cancel})=>{
   surface?.subscribe(()=>{place();});
   function paint(){
     const key=JSON.stringify([state,name,busy,hint]);if(key===redraw)return;redraw=key;
-    const [word,ico]=names[state]||names.save,a=g(ico);
+    const update=["previous","saved"].includes(state);
+    const [word,ico]=update?[L("增量更新","Update conversation"),"upload"]:names[state]||names.save,a=g(ico);
     if(ico==="spin")a.classList.add("spin");const t=make("span","");t.textContent=word;main.replaceChildren(a,t);
     if(state==="save"&&name){const sm=make("small","");sm.textContent="· "+name;main.append(sm);}
-    if(["saved","copy","partial","previous"].includes(state)){const ext=g("external");ext.style.width="12px";main.append(ext);}
+    if(["copy","partial"].includes(state)){const ext=g("external");ext.style.width="12px";main.append(ext);}
     const aria=[word,state==="save"&&name,hint].filter(Boolean).join(" · ");main.title=aria;main.setAttribute("aria-label",aria);
     main.disabled=busy||state==="saving"||state==="checking"||state==="recovering";bar.dataset.tone=["partial","append-partial","review","uncertain","failed","reconnect"].includes(state)?"warning":"normal";
     toggle.hidden=state==="project";bar.dataset.project=String(state==="project");
@@ -192,13 +193,16 @@ globalThis.ReaderSourceControl=({pathId,capture,cancel})=>{
   main.onclick=e=>{if(!e.isTrusted||busy)return;note.hidden=true;
     if(state==="project")void send("open-center").then(r=>{if(!r?.ok)throw Error();}).catch(()=>{note.textContent=messages.panel;note.hidden=false;});
     else if(["append-ready","append-complete","append-partial","append-review","append-processed"].includes(state))void openAppend();
-    else if(["previous","saved","copy","partial"].includes(state))void saved("open-saved");
+    else if(["previous","saved"].includes(state))void doSave();
+    else if(["copy","partial"].includes(state))void saved("open-saved");
     else if(["save","cancelled"].includes(state))void doSave();else void panel();};
   function fillMenu(){
     const focused=menu.contains(shadow.activeElement)?shadow.activeElement.textContent:null;menu.replaceChildren();
     if(!busy&&!["connect","reconnect","checking","unavailable"].includes(state))menuAction("选择内容并追加到…","Select content and append to…",append);
     if(!busy&&["previous","saved","copy","partial","failed","append-ready","append-complete","append-partial","append-review","append-processed","cancelled"].includes(state))
-      menuAction("检查并保存当前版本","Check and save this version",doSave);
+      menuAction("增量更新当前对话","Update this conversation",doSave);
+    if(!busy&&["previous","saved","copy","partial"].includes(state))
+      menuAction("打开已存版本","Open saved version",()=>saved("open-saved"));
     if(!busy&&["save","destination"].includes(state))menuAction("查找已存版本","Find saved version",()=>saved("find-saved"));
     // The host owns delivery after the archive is sealed. Closing this source page
     // must not pretend to cancel a request already acknowledged by Reader.

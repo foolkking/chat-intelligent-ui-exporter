@@ -351,13 +351,15 @@ test("source control shares real PageIndex semantics: virtual history keeps prog
     assert.match(root.querySelector(".read-progress p").textContent, /2.0 KiB/);
     backend = {matchAttempt: true}; resolveCapture(); await tick();
     assert.equal(lastAttempt, "attempt-1");
-    assert.match(root.querySelector(".main").textContent, /Saved to Reader/);
+    assert.match(root.querySelector(".main").textContent, /Update conversation/);
+    assert.match(root.querySelector(".read-progress p").textContent, /Saved to Reader/);
     w.document.querySelector("main").setAttribute("data-current-node-id", "leaf-2"); await tick();
-    assert.match(root.querySelector(".main").textContent, /Open saved version/);
+    assert.match(root.querySelector(".main").textContent, /Update conversation/);
+    assert.equal(root.querySelector(".read-progress").hidden,true,"branch change must invalidate the previous attempt, not claim a fresh save");
     backend = {state: "save"};
     // Reuse the existing menu command instead of exporting internals just for a test.
     root.querySelector(".toggle").onclick({isTrusted: true});
-    [...root.querySelectorAll(".menu button")].find(button => button.textContent === "Check and save this version").onclick({isTrusted: true});
+    [...root.querySelectorAll(".menu button")].find(button => button.textContent === "Update this conversation").onclick({isTrusted: true});
     publish({stage: "source", done: 4096});
     answer.textContent = "An actual same-message source edit."; await tick();
     assert.equal(root.querySelector(".read-progress").hidden, true);

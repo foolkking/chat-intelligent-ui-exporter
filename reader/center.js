@@ -8,10 +8,11 @@
   const stepNames=[L("选择来源","Choose source"),L("选择对话","Choose conversations"),L("确认 Reader 目标","Reader destination"),L("查看任务","Import tasks")];
   let step=0,source=null,chosen=new Set(),page=0,selectionModel,device=null,projects=[],plan=null,running=false,stop=false,reading=false,readVersion=0,ownerChanged=false;
   let pairTimer,taskTimer,sourceDirName,mappings={},mappingScope="",bindingRun=0,targetRun=0,taskPage=0;
-  let targetsReady=false,webProject=false,mappingRevision=0;
+  let targetsReady=false,webProject=false,mappingRevision=0,submitting=false;
   const projectDrafts=new Map();
+  const sourceBindings=new Map(); // live lookup evidence, never an append authorization
   const unnamedGroups=new Map();
-  let activeGroup="",projectPage=0,collapsed=false,sourceRun=0,refreshing=false,sourceBlocked=false;
+  let activeGroup="",projectPage=0,collapsed=false,sourceRun=0,refreshing=false,sourceBlocked=false,selectedOnly=false;
   const projectNodes=new Map(),wide=matchMedia("(min-width:661px)");
   const root=navigator.storage.getDirectory();
   const frame=globalThis.ReaderFrameContext,embedded=frame?.view==="import"&&Number.isSafeInteger(frame.tab)&&frame.tab>=0;
@@ -29,16 +30,15 @@
     "archive-note":["在本机读取，确认后发送勾选的内容。","Read locally. Confirm which conversations and files to send."],
     "file-copy":["选择 ZIP 或 conversations.json","Choose ZIP or conversations.json"],
     "selection-heading":["选择要保存的对话","Choose conversations to save"],"group-label":["ChatGPT 来源项目","ChatGPT source project"],
-    "query-label":["按来源标题筛选","Filter source titles"],"clear-selection":["清空勾选","Clear selection"],
-    "refresh-source":["刷新来源","Refresh source"],"return-selection":["返回当前勾选","Return to selection"],
+    "refresh-source":["刷新来源","Refresh source"],
     "project-query-label":["查找来源项目","Find source project"],"project-prev":["上一页项目","Previous projects"],"project-next":["下一页项目","Next projects"],
-    "selection-more-label":["选择操作","Selection actions"],"saved-state-note":["Reader 保存状态未核对","Reader saved state not checked."],
+    "saved-state-note":["Reader 保存状态未核对","Reader saved state not checked."],
     "source-more":["下一页","Next page"],"back-source":["重新选择来源","Choose another source"],"to-target":["选择 Reader 目标","Choose Reader destination"],
     "target-heading":["确认 Reader 保存位置","Confirm Reader destination"],"mode-label":["项目对应方式","Project mapping"],
-    "include-files-label":["正文及可取得的附件原文件","Messages and available original files"],"remember-label":["记住此来源与当前 Reader 账号的项目映射","Remember this mapping for this source and Reader account"],
+    "include-files-label":["正文及可取得的附件原文件","Messages and available original files"],
     "new-project":["在 Reader 管理项目","Manage projects in Reader"],"reload-projects":["刷新项目","Refresh projects"],
     "append-policy":["已有相同内容会跳过。只有验证共同前缀后才在末尾追加；分支变化、缺件、原文修改或实时分享需单独核对，不覆盖原件。","Identical content is skipped. Only a verified common prefix permits append-only updates. Branch changes, missing files, modified originals and live shares need review; originals are not overwritten."],
-    "back-selection":["返回勾选","Back to selection"],"tasks-heading":["导入任务","Import tasks"],
+    "tasks-heading":["导入任务","Import tasks"],
     "pause-queue":["暂停后续读取","Pause next conversations"],"continue-queue":["继续队列","Resume queue"],"retry-failed":["仅重试未完成项","Retry incomplete items"],
     "cancel-pending":["取消尚未发送的项","Cancel unsubmitted items"],"new-import":["新的导入","New import"],
     "resume-heading":["有保留的导入计划","Retained import plan"],"resume-plan":["查看并继续","View and resume"],"forget-plan":["结束此计划","End this plan"],
@@ -50,11 +50,9 @@
   };
   for(const [id,[c,e]] of Object.entries(labels))text(id,c,e);
   $("source-prev").textContent=L("上一页","Previous page");
-  $("selection-view").setAttribute("aria-label",L("显示范围","Selection view"));
   $("source-rows").setAttribute("aria-label",L("来源对话","Source conversations"));
   $("task-filter").setAttribute("aria-label",L("任务状态","Task state"));
   $("steps").setAttribute("aria-label",L("导入步骤","Import steps"));
-  $("source-query").placeholder=L("搜索对话标题…","Search conversation titles…");
   $("project-query").placeholder=L("查找来源项目…","Find source project…");
   $("pair-reader").href=READER_ORIGIN+"/extension/devices";$("new-project").href=READER_ORIGIN+"/";
   $("library-link").onclick=()=>embedded?work(async()=>{
@@ -88,24 +86,51 @@
       ReaderProgress.sourceReason(e.code,zh)||L("操作未完成，原选择和任务已保留。","Not completed. Selections and tasks are retained."));}
   async function work(fn){$("error").textContent="";try{await fn();}catch(e){if(e.name!=="AbortError")failure(e);}}
   const display=ReaderProgress.throttle(p=>$("activity").textContent=ReaderProgress.describe(p,zh));
+  const canTarget=()=>!!selectionModel&&!refreshing&&!sourceBlocked&&!reading&&chosen.size>0&&!(source?.kind==="web"&&!source.scope);
+  function updateSteps(){
+    const allowed=[!running&&!submitting,!!selectionModel&&!running&&!submitting,canTarget()&&!running&&!submitting,!!plan];
+    for(const b of $("steps").children){
+      const i=Number(b.dataset.step);b.disabled=!allowed[i];
+      if(i===step)b.setAttribute("aria-current","step");else b.removeAttribute("aria-current");
+    }
+  }
+  for(const [i,name] of stepNames.entries()){
+    const b=el("button",`${i+1}  ${name}`);b.type="button";b.dataset.step=String(i);
+    b.setAttribute("aria-controls",["source-step","selection-step","target-step","tasks-step"][i]);
+    b.onclick=()=>work(()=>goStep(i));$("steps").append(b);
+  }
   function show(n){step=n;for(const [i,id] of ["source-step","selection-step","target-step","tasks-step"].entries())$(id).hidden=i!==n;
-    const library=$("library-link");
-    $("steps").replaceChildren(...stepNames.map((name,i)=>{const x=el("span",`${i+1}  ${name}`);if(i===n)x.setAttribute("aria-current","step");return x;}));
-    if(embedded)$("steps").append(library);
-    $("activity").textContent="";$("error").textContent="";const h=document.querySelector("section:not([hidden])>h2");h?.setAttribute("tabindex","-1");h?.focus({preventScroll:true});
+    $("source-tools").hidden=$("selected-count").hidden=n!==1;
+    $("mapping-tools").hidden=n!==2||!device;
+    updateSteps();
+    $("activity").textContent="";$("error").textContent="";
+    $("steps").children[n]?.focus({preventScroll:true});
+  }
+  async function goStep(n){
+    updateSteps();if(n===step||$("steps").children[n]?.disabled)return;
+    // Switching a view is never a submit/resume action. Invalidate every
+    // in-flight draft callback, but do not cancel or replace a durable plan.
+    sourceRun++;readVersion++;bindingRun++;targetRun++;cancelRefresh();
+    targetsReady=false;releaseProjectWindows();clearInterval(pairTimer);
+    $("pair-info").hidden=true;$("web-tabs").hidden=true;
+    show(n);
+    if(n===0)await resumeBox();
+    else if(n===1)selection();
+    else if(n===2)await targets(true);
+    else if(n===3)await renderTasks();
   }
   function groupName(g){
-    if(g==="unknown")return L("归属未知","Membership unknown");if(g==="unclassified")return L("未归类","Unclassified");
+    // Presentation only: unknown provenance remains a separate internal group.
+    if(g==="unknown"||g==="unclassified")return L("未分类","Unclassified");
     const name=ReaderRoutes.projectName(source?.groups?.[g],g.slice(8));
     if(name)return name;
     if(!unnamedGroups.has(g))unnamedGroups.set(g,unnamedGroups.size+1);
     const n=unnamedGroups.get(g);
     return L(`名称未知的项目 ${n}`,`Unnamed project ${n}`);
   }
-  const selectionOptions=()=>({query:$("source-query").value,group:activeGroup,page,
-    selectedOnly:$("selection-view").value==="selected"});
+  const selectionOptions=()=>({group:activeGroup,page,selectedOnly});
   function projectLayout(){
-    const pane=$("conversation-pane"),review=$("selection-view").value==="selected",key=review?"":activeGroup;
+    const pane=$("conversation-pane"),review=selectedOnly,key=review?"":activeGroup;
     const anchor=projectNodes.get(key)||projectNodes.get(""),focused=document.activeElement;
     const parent=wide.matches?document.querySelector(".catalogue-layout"):anchor?.li;
     if(parent&&pane.parentElement!==parent)parent.append(pane);
@@ -120,10 +145,10 @@
     document.querySelector(".catalogue-layout").dataset.wide=String(wide.matches);
   }
   function chooseGroup(group,toggle=false){
-    const same=group===activeGroup&&$("selection-view").value!=="selected";
+    const same=group===activeGroup&&!selectedOnly;
     collapsed=toggle&&!wide.matches&&same?!collapsed:false;activeGroup=group;
     if(!same)page=0;
-    $("selection-view").value="all";$("source-query").disabled=$("source-group").disabled=false;
+    selectedOnly=false;$("source-group").disabled=false;
     selection(); // no checkbox or source-read side effects
   }
   function projectList(){
@@ -139,7 +164,7 @@
       button.onclick=()=>chooseGroup(g.id,true);
       check.onchange=()=>work(()=>{selectionModel.apply(selectionModel.snapshot("filtered",{group:g.id}),{selected:check.checked});selection();});
       const target=el("label",null,"project-select");target.append(check);
-      line.append(target,button);li.append(line);projectNodes.set(g.id,{li,button,check,count,name:g.name});return li;
+      line.append(button,target);li.append(line);projectNodes.set(g.id,{li,button,check,count,name:g.name});return li;
     }));
     // The compact select is a shortcut for this project page, not an unbounded
     // second copy of a large directory. The active off-page choice remains named.
@@ -164,44 +189,31 @@
         const index=v.rows.indexOf(row),focused=document.activeElement===check;
         selectionModel.set(row.id,check.checked);
         if(options.selectedOnly){selection();if(focused){const next=$("source-rows").querySelectorAll("input");
-          (next[Math.min(index,next.length-1)]||$("selection-view")).focus({preventScroll:true});}}
+          (next[Math.min(index,next.length-1)]||$("selected-count")).focus({preventScroll:true});}}
         else counts();
       };
       const updated=Number.isFinite(row.update_time)?new Date(row.update_time*1000):row.updatedAt?new Date(row.updatedAt):null;
       const metadata=[groupName(row.group)];
+      if(sourceBindings.get(row.id))metadata.push(L("增量更新","Update existing"));
       if(updated&&!isNaN(+updated))metadata.push(updated.toLocaleDateString());
       if(Number.isSafeInteger(row.attachmentCount)&&row.attachmentCount>=0)metadata.push(L(`附件 ${row.attachmentCount}`,`${row.attachmentCount} files`));
       copy.append(el("span",row.title,"title"),el("span",metadata.join(" · "),"meta"));label.append(check,copy);li.append(label);return li;
     }));
     $("source-more").hidden=$("source-prev").hidden=v.pages<2;$("source-more").disabled=!v.hasNext;$("source-prev").disabled=!v.hasPrevious;
     $("source-page-status").textContent=L(`${v.from}–${v.to} / ${v.total} 条`,`${v.from}–${v.to} of ${v.total}`);
-    $("select-visible").disabled=$("select-page").disabled=!v.total;
-    $("select-page").textContent=L(`选择本页 ${v.rows.length} 条`,`Select page (${v.rows.length})`);
-    $("scope-label").textContent=options.selectedOnly?L(`已选清单（${v.total} 条）`,`Selected list (${v.total})`):
-      L(`全选当前已发现范围（${v.total} 条）`,`Select discovered range (${v.total})`);
-    $("select-page").onclick=()=>{selectionModel.apply(selectionModel.snapshot("page",options.selectedOnly?{selectedOnly:true,page}:options));selection();};
-    $("select-visible").onchange=()=>work(()=>{selectionModel.apply(selectionModel.snapshot("filtered",options.selectedOnly?{selectedOnly:true}:options),
-      {selected:$("select-visible").checked});selection();});
-    const proof=selectionModel.project(options.group);
-    $("select-project").hidden=!options.group.startsWith("project:")||options.selectedOnly;
-    $("select-project").disabled=!proof.allowed;
-    $("select-project").textContent=proof.allowed?L(`选择此导出包内整个项目（${proof.count} 条）`,`Select this export's entire project (${proof.count})`):
-      L("目录或归属未完整核实，不能选整个项目","Entire project unavailable: directory or membership is incomplete");
-    $("select-project").onclick=()=>{selectionModel.apply(selectionModel.snapshot("project",options));selection();};
-    const unknown=selectionModel.summary().groups.find(g=>g.id==="unknown")?.knownCount||0;
-    $("source-status").textContent=(source?.kind==="archive"?L(`导出包中 ${source.rows.length} 条；项目归属以文件中的明确记录为准。`,`${source.rows.length} conversations in export; project membership requires explicit metadata.`):
-      L(`已发现 ${source?.rows.length||0} 条 · 部分目录，不代表整个账号或项目`,`${source?.rows.length||0} discovered · partial directory, not an entire account or project`))+
-      (unknown?L(` · ${unknown} 条归属未知（不等于未归类）`,` · ${unknown} membership unknown (not unclassified)`):"");
+    $("group-label").textContent=source.kind==="web"?L("来源项目 · 部分目录","Source projects · partial directory"):L("导出包项目","Export projects");
     $("selection-empty").hidden=!!v.total;$("selection-empty").textContent=options.selectedOnly?L("尚未勾选对话。","No conversations selected."):L("此范围没有匹配的已发现对话。","No discovered conversations match this scope.");
     counts();projectLayout();
   }
   function counts(){
-    const summary=selectionModel.summary(),options=selectionOptions(),v=options.selectedOnly?selectionModel.selected({page}):selectionModel.view(options);
-    $("selected-count").textContent=L(`已勾选 ${chosen.size} 条 · ${summary.selectedGroupCount} 个来源分组`,`${chosen.size} selected · ${summary.selectedGroupCount} source groups`);
-    $("group-summary").textContent=L(`已选 ${v.selectedInFilter} 条`,`${v.selectedInFilter} selected`);
-    $("select-visible").checked=v.total>0&&v.selectedInFilter===v.total;
-    $("select-visible").indeterminate=v.selectedInFilter>0&&v.selectedInFilter<v.total;
-    $("to-target").disabled=refreshing||sourceBlocked||!chosen.size||source?.kind==="web"&&!source.scope;
+    const summary=selectionModel.summary();
+    $("selected-count").textContent=L(`已选 ${chosen.size} 条`,`${chosen.size} selected`);
+    $("selected-count").setAttribute("aria-pressed",String(selectedOnly));
+    $("selected-count").setAttribute("aria-label",L(`已选 ${chosen.size} 条，${selectedOnly?"返回全部目录":"查看已选"}`,`${chosen.size} selected; ${selectedOnly?"show all discovered":"review selection"}`));
+    const checked=sourceBindings.size,existing=[...sourceBindings.values()].filter(Boolean).length;
+    $("saved-state-note").textContent=checked?L(`已核对 ${checked} 条 · ${existing} 条可检查增量更新`,`${checked} checked · ${existing} available for update checks`):
+      L("Reader 保存状态未核对","Reader saved state not checked.");
+    $("to-target").disabled=!canTarget();updateSteps();
     const byID=new Map(summary.groups.map(g=>[g.id,g]));byID.set("",{knownCount:summary.knownCount,selectedCount:summary.selectedCount});
     for(const [id,n] of projectNodes){const g=byID.get(id);n.count.textContent=`${g.selectedCount}/${g.knownCount}`;
       n.check.checked=g.knownCount>0&&g.knownCount===g.selectedCount;n.check.indeterminate=g.selectedCount>0&&g.selectedCount<g.knownCount;
@@ -209,22 +221,22 @@
     for(const o of $("source-group").options){const g=byID.get(o.value);if(g)o.textContent=`${o.value?groupName(o.value):L("全部来源项目","All source projects")} (${g.selectedCount}/${g.knownCount})`;}
   }
   function catalogue(){
+    sourceBindings.clear();
     unnamedGroups.clear();
-    chosen.clear();page=projectPage=0;collapsed=sourceBlocked=false;activeGroup="";$("source-query").value=$("project-query").value="";$("selection-view").value="all";
+    chosen.clear();page=projectPage=0;collapsed=sourceBlocked=selectedOnly=false;activeGroup="";$("project-query").value="";
     $("refresh-status").textContent="";
-    $("source-label").textContent=source.kind==="web"?L("ChatGPT 来源","ChatGPT source"):L("本机导出包","Local export");
-    $("refresh-source").hidden=source.kind!=="web";$("return-selection").hidden=false;
-    $("source-group").disabled=$("source-query").disabled=false;
+    $("refresh-source").hidden=source.kind!=="web";
+    $("source-group").disabled=false;
     selectionModel=ReaderCenterSelection.create({source,chosen,groupName});
     const groups=selectionModel.summary().groups.map(g=>g.id);
     const validHint=source.kind==="web"&&source.scope&&source.hint&&groups.includes(source.hint);
     if(validHint){activeGroup=source.hint;projectPage=Math.floor(groups.indexOf(activeGroup)/ReaderCenterSelection.PAGE_SIZE);}
     projectList();show(1);selection();
-    if(source.hint&&!validHint)$("source-status").textContent+=" · "+L("项目提示未核实，已显示全部已发现对话","Project hint unverified; showing all discovered conversations");
   }
   async function clearSource(){
+    sourceBindings.clear();
     readVersion++;sourceRun++;bindingRun++;targetRun++;source=null;selectionModel=null;chosen.clear();mappings={};mappingScope="";
-    refreshing=sourceBlocked=false;$("refresh-source").disabled=false;$("return-selection").hidden=true;
+    refreshing=sourceBlocked=false;$("refresh-source").disabled=false;
     if($("bindings-status"))$("bindings-status").textContent="";
     if(sourceDirName){const key=sourceDirName;sourceDirName=null;await (await root).removeEntry(key,{recursive:true}).catch(()=>{});}
   }
@@ -245,12 +257,10 @@
       else catalogue();
       if(previous)await (await root).removeEntry(previous,{recursive:true}).catch(()=>{});
     }catch(e){await (await root).removeEntry(name,{recursive:true}).catch(()=>{});throw e;}
-    finally{reading=false;$("source-file").disabled=$("resume-file").disabled=false;display.flush();}
+    finally{reading=false;$("source-file").disabled=$("resume-file").disabled=false;display.flush();if(selectionModel)counts();else updateSteps();}
   }
   $("source-file").onchange=()=>work(()=>pick($("source-file").files[0]));
   $("resume-file").onchange=()=>work(()=>pick($("resume-file").files[0],true));
-  $("source-query").oninput=()=>{page=0;selection();};$("source-query").oncompositionstart=()=>{$("source-query").oninput=null;};
-  $("source-query").oncompositionend=()=>{$("source-query").oninput=()=>{page=0;selection();};page=0;selection();};
   $("source-group").onchange=()=>chooseGroup($("source-group").value);$("source-more").onclick=()=>{page++;selection();};$("source-prev").onclick=()=>{page=Math.max(0,page-1);selection();};
   function projectPageAt(n,restoreFocus=false){
     projectPage=n;projectList();
@@ -272,9 +282,7 @@
     }
     projectLayout();
   });
-  $("selection-view").replaceChildren(new Option(L("全部目录","All discovered"),"all"),new Option(L("查看已选","Review selected"),"selected"));
-  $("selection-view").onchange=()=>{page=0;collapsed=false;$("source-group").disabled=$("source-query").disabled=$("selection-view").value==="selected";selection();};
-  $("clear-selection").onclick=()=>{selectionModel.clear();selection();};
+  $("selected-count").onclick=()=>{if(step!==1||!selectionModel)return;selectedOnly=!selectedOnly;page=0;collapsed=false;$("source-group").disabled=selectedOnly;selection();};
   function cancelRefresh(){
     if(refreshing){
       sourceBlocked=true;
@@ -282,13 +290,7 @@
     }
     refreshing=false;$("refresh-source").disabled=false;
   }
-  $("back-source").onclick=()=>work(async()=>{
-    sourceRun++;cancelRefresh();$("web-tabs").hidden=true;
-    $("return-selection").textContent=L(`返回当前勾选（${chosen.size} 条）`,`Return to selection (${chosen.size})`);
-    show(0);await resumeBox();
-  });
-  $("return-selection").onclick=()=>{if(!source||!selectionModel)return;sourceRun++;readVersion++;show(1);selection();};
-  $("back-selection").onclick=()=>{bindingRun++;targetRun++;targetsReady=false;releaseProjectWindows();clearInterval(pairTimer);show(1);selection();};
+  $("back-source").onclick=()=>work(()=>goStep(0));
   async function current(){
     await ReaderClient.trust;const d=(await storage.get("device")).device;
     if(d?.origin!==READER_ORIGIN)return null;return d;
@@ -308,16 +310,16 @@
     for(const [id,target] of byId)targets["project:"+id]=target;
     return targets;
   }
-  async function targets(){
+  async function targets(lookup=false){
     const n=++targetRun,snapshot=source;bindingRun++;targetsReady=false;
     $("confirm-import").disabled=$("target-mode").disabled=$("target-mappings").inert=true;
     if($("bindings-status"))$("bindings-status").textContent="";
     const owner=await current();if(n!==targetRun||step!==2||source!==snapshot)return;
-    device=owner;$("account").textContent=device?String(device.name||L("已连接","Connected"))+" · "+READER_ORIGIN:READER_ORIGIN;
+    device=owner;$("mapping-tools").hidden=!device;
     $("pair-start").hidden=!!device;$("targets").hidden=!device;
     if(!device||!snapshot)return;
     const sourceScope=snapshot.scope,ownerScope=JSON.stringify([READER_ORIGIN,owner.id,owner.user,sourceScope]);
-    if(mappingScope!==ownerScope){$("target-mappings").replaceChildren();projectDrafts.clear();}
+    if(mappingScope!==ownerScope){$("target-mappings").replaceChildren();projectDrafts.clear();sourceBindings.clear();}
     const caps=await (await ReaderClient.request(owner.id,"capabilities")).json();
     if(caps.protocol!==1||caps.import_profile!=="reader-chat-v1"||!caps.capture||!caps.resumable_capture)throw Error("upgrade-required");
     const loaded=await (await ReaderClient.request(owner.id,"projects")).json();
@@ -333,7 +335,7 @@
     if(mappingScope!==ownerScope){
       const defaultProject=destination?.device===device.id?destination.project||"":"";mappings=saved?.targets?rememberedTargets(saved.targets):{"*":defaultProject};
       mappingScope=ownerScope;$("target-mode").value="groups";
-      $("include-files").checked=destination?.device===device.id?!destination.textOnly:true;$("remember-mapping").checked=false;
+      $("include-files").checked=destination?.device===device.id?!destination.textOnly:true;
     }
     if($("check-bindings")){$("check-bindings").hidden=!caps.source_lookup;$("check-bindings").disabled=false;
       $("check-bindings").textContent=L(`核对已选 ${chosen.size} 条的已有绑定`,`Check saved references for ${chosen.size} selected conversations`);}
@@ -345,6 +347,9 @@
     }
     targetsReady=true;$("target-mode").disabled=$("target-mappings").inert=false;
     renderTargets();
+    // Choosing "Reader destination" is an explicit request to compare only the
+    // selected references. Passive catalogue discovery still discloses none.
+    if(lookup&&caps.source_lookup===true)await checkBindings();
   }
   function releaseProjectWindows(){
     for(const [group,draft] of projectDrafts){
@@ -387,8 +392,8 @@
   function renderTargets(focus,selector){
     mappingRevision++;
     const samples=new Map();
-    for(const r of source.rows)if(chosen.has(r.id)&&!samples.has(r.group))samples.set(r.group,r.title);
-    const groups=$("target-mode").value==="one"?["*"]:[...samples.keys()];
+    for(const r of source.rows)if(chosen.has(r.id)&&!sourceBindings.get(r.id)&&!samples.has(r.group))samples.set(r.group,r.title);
+    const groups=$("target-mode").value==="one"&&samples.size?["*"]:[...samples.keys()];
     $("target-mappings").replaceChildren(...groups.map((g,i)=>{
       const name=g.startsWith("project:")?ReaderRoutes.projectName(source.groups?.[g],g.slice(8)):"";
       const value=(Object.hasOwn(mappings,g)?mappings[g]:mappings["*"])||"";
@@ -406,14 +411,17 @@
   }
   function confirmCopy(){
     $("confirm-import").disabled=!targetsReady||!chosen.size||!!$("target-mappings").querySelector('[data-ready="false"]');
-    const n=chosen.size;$("confirm-summary").textContent=L("已保存的对话保留在原项目。","Previously saved conversations keep their project.");
-    $("confirm-import").textContent=L(`确认导入 ${n} 条对话`,`Import ${n} conversations`);
+    const n=chosen.size,updates=[...chosen].filter(id=>sourceBindings.get(id)).length,checked=[...chosen].filter(id=>sourceBindings.has(id)).length;
+    $("confirm-summary").textContent=(checked?L(`${updates} 条已有对应对话，按增量更新检查；${checked-updates} 条未发现已存版本。`,`${updates} existing conversations to check for updates; ${checked-updates} without a saved reference.`):"")+
+      L("已保存的对话保留在原项目。","Previously saved conversations keep their project.");
+    $("confirm-import").textContent=updates===n&&n?L(`确认更新 ${n} 条对话`,`Update ${n} conversations`):
+      updates?L(`确认保存 / 更新 ${n} 条对话`,`Save / update ${n} conversations`):L(`确认导入 ${n} 条对话`,`Import ${n} conversations`);
   }
-  $("to-target").onclick=()=>work(async()=>{if($("to-target").disabled)return;show(2);await targets();});
-  if($("check-bindings"))$("check-bindings").onclick=()=>work(async()=>{
-    if($("check-bindings").disabled)return;
+  $("to-target").onclick=()=>work(()=>goStep(2));
+  async function checkBindings(){
+    if($("check-bindings").disabled||!targetsReady||step!==2)return;
     const snapshot=source,owner=await current(),ids=source.rows.filter(r=>chosen.has(r.id)).map(r=>r.id),n=++bindingRun;
-    if(!owner||owner.id!==device?.id)throw Error("owner-changed");
+    if(!owner||owner.id!==device?.id||owner.user!==device.user)throw Error("owner-changed");
     $("check-bindings").disabled=true;let found=0,read=0;
     const valid=async()=>{
       const now=await current();
@@ -421,18 +429,25 @@
       if(now?.id!==owner.id||now?.user!==owner.user)throw Error("owner-changed");
     };
     try{
+      for(const id of ids)sourceBindings.delete(id);
+      renderTargets();
       for(const id of ids){
         await valid();
         const r=await (await ReaderClient.request(owner.id,"sources/status",{method:"POST",headers:{"Content-Type":"application/json"},
           body:JSON.stringify({source_id:id})})).json();
-        await valid();found+=uuid(r.conversation_id)?1:0;read++;
+        await valid();
+        if(!r||!Object.hasOwn(r,"conversation_id")||r.conversation_id!==null&&!uuid(r.conversation_id))throw Error("operation-unconfirmed");
+        sourceBindings.set(id,r.conversation_id);found+=uuid(r.conversation_id)?1:0;read++;
+        confirmCopy();
         $("bindings-status").textContent=L(`已核对 ${read}/${ids.length} 条；${found} 条找到绑定。绑定不代表内容一致。`,
           `Checked ${read}/${ids.length}; ${found} saved references. A reference does not prove identical content.`);
         if(read<ids.length)await new Promise(resolve=>setTimeout(resolve,200));
       }
+      await valid();renderTargets();
     }finally{if(n===bindingRun)$("check-bindings").disabled=false;}
-  });
-  $("target-mode").onchange=()=>{releaseProjectWindows();renderTargets();};$("reload-projects").onclick=()=>work(targets);
+  }
+  $("check-bindings").onclick=()=>work(checkBindings);
+  $("target-mode").onchange=()=>{releaseProjectWindows();renderTargets();};$("reload-projects").onclick=()=>work(()=>targets(true));
   async function pairing(action){
     const p=await ReaderClient.pair(action);$("pair-info").hidden=!p||!!p.connected;
     $("short-code").textContent=p?.code||"";
@@ -482,12 +497,16 @@
     if(!r?.ok)throw Error(Object.hasOwn(errors,r?.error)?r.error:"operation-unconfirmed");
   }
   $("confirm-import").onclick=()=>work(async()=>{
-    if(running||step!==2||$("confirm-import").disabled)return;
+    if(running||submitting||step!==2||$("confirm-import").disabled)return;
+    submitting=true;$("confirm-import").setAttribute("aria-busy","true");updateSteps();
+    try{
     const snapshot=source,epoch=targetRun,revision=mappingRevision,scope=mappingScope,d=await current();
     const stillConfirmed=()=>step===2&&source===snapshot&&epoch===targetRun&&revision===mappingRevision&&scope===mappingScope&&!$("confirm-import").disabled;
     if(!stillConfirmed())return;
     if(!d||d.id!==device?.id||d.user!==device.user)throw Error("owner-changed");
-    const rows=source.rows.filter(r=>chosen.has(r.id)),fixed={};for(const row of rows)fixed[row.group]=mappings[$("target-mode").value==="one"?"*":row.group]||null;
+    const rows=source.rows.filter(r=>chosen.has(r.id)),fixed={};
+    const needsDestination=new Set(rows.filter(r=>!sourceBindings.get(r.id)).map(r=>r.group));
+    for(const row of rows)fixed[row.group]=needsDestination.has(row.group)?mappings[$("target-mode").value==="one"?"*":row.group]||null:null;
     const next=ReaderBatch.create({device:d,origin:READER_ORIGIN,source:{kind:source.kind,scope:source.scope,...(source.kind==="web"?{catalog:source.catalog,tab:source.tab}: {})},rows,targets:fixed,attachments:$("include-files").checked});
     await navigator.locks.request("reader-batch-plan",async()=>{
       const {device:now,batchPlan:previous,jobs=[]}=await storage.get(["device","batchPlan","jobs"]);
@@ -496,11 +515,23 @@
       if(previous&&previous.id!==plan?.id)throw Error("queue-open");
       if(previous?.items.some(i=>!i.cancelled&&!i.skipped&&(!ReaderBatch.success(jobs.find(j=>j.key===i.key&&j.device===previous.device)))))throw Error("plan-retained");
       await storage.set({batchPlan:next});
-    });plan=next;
-    if($("remember-mapping").checked){const {batchMappings=[]}=await storage.get("batchMappings");
-      await storage.set({batchMappings:[...batchMappings.filter(m=>!(m.origin===READER_ORIGIN&&m.user===d.user&&m.source===snapshot.scope)),
-        {origin:READER_ORIGIN,user:d.user,source:snapshot.scope,targets:fixed}]});}
-    show(3);await renderTasks();await runQueue();
+    });plan=next;show(3);await renderTasks();
+    // Remember only at the explicit commit boundary, never while viewing or
+    // changing a mapping. A queued import retains its fixed destination.
+    await navigator.locks.request("reader-device",async()=>{
+      const now=await current();if(now?.id!==d.id||now.user!==d.user)throw Error("owner-changed");
+      const {batchMappings=[]}=await storage.get("batchMappings");
+      const old=batchMappings.find(m=>m.origin===READER_ORIGIN&&m.user===d.user&&m.source===snapshot.scope);
+      const remembered={...old?.targets};
+      // An update did not choose a new project: do not overwrite a remembered
+      // new-import destination with null just because all selected rows exist.
+      for(const group of needsDestination)remembered[group]=fixed[group];
+      await storage.set({batchMappings:[...batchMappings.filter(m=>m!==old),
+        {origin:READER_ORIGIN,user:d.user,source:snapshot.scope,targets:remembered}]});
+    });
+    await ReaderClient.rememberSources(d,rows.map(r=>r.id));
+    await runQueue();
+    }finally{submitting=false;$("confirm-import").removeAttribute("aria-busy");updateSteps();}
   });
   const isolatedSourceFailure=d=>d?.category==="source"&&["SOURCE_FORMAT_INVALID","SOURCE_PAGE_INVALID","SOURCE_PAGE_CHANGED","SOURCE_BRANCH_UNVERIFIED","SOURCE_ATTACHMENT_FAILED"].includes(d.code);
   async function requestReceipt(item){
@@ -621,6 +652,7 @@
       cancelled:L("已取消","Cancelled"),"result-unavailable":L("原记录不可用","Saved record unavailable")}[j.phase]||(j.active?L("Reader 正在处理","Reader is processing"):L("需检查收据","Check receipt"));
   }
   async function renderTasks(){
+    updateSteps();
     if(!plan)return;const {device:d,jobs=[]}=await storage.get(["device","jobs"]);
     if(!ReaderBatch.owned(plan,d,READER_ORIGIN)){stop=true;ownerChanged=true;$("task-rows").replaceChildren();throw Error("owner-changed");}
     const byKey=new Map(jobs.filter(j=>j.device===plan.device).map(j=>[j.key,j]));
@@ -655,7 +687,7 @@
         const actual=j?.result?.current_project;
         if(actual)copy.append(el("div",L("实际保存位置：","Saved destination: ")+(actual.state==="project"?
           ReaderRoutes.projectName(actual.name,actual.id)||L("项目名称未知","Project name unavailable"):
-          actual.state==="unclassified"?L("未归类","Unclassified"):L("项目不可用","Project unavailable")),"meta"));
+          actual.state==="unclassified"?L("未分类","Unclassified"):L("项目不可用","Project unavailable")),"meta"));
         if(j?.phase==="done"&&uuid(j.cid)){const a=el("a",L("打开 Reader","Open Reader"));a.href=READER_ORIGIN+"/conversations/"+j.cid;a.target="_blank";a.rel="noopener noreferrer";a.dataset.action="open";actions.append(a);}
         if(j?.review&&!item.skipped){
           const r=j.review;copy.append(el("p",[r.partial?L("部分附件或交互内容缺失","Some files or interactive content are missing"):"",
@@ -692,7 +724,7 @@
   }
   async function resumeBox(){
     const d=await current(),p=(await storage.get("batchPlan")).batchPlan;plan=ReaderBatch.owned(p,d,READER_ORIGIN)?p:null;
-    $("resume-box").hidden=!plan;
+    $("resume-box").hidden=!plan;updateSteps();
   }
   $("resume-plan").onclick=()=>work(async()=>{show(3);await renderTasks();await chrome.runtime.sendMessage({kind:"wake"});});
   $("forget-plan").onclick=()=>work(async()=>{
@@ -773,7 +805,7 @@
   chrome.storage.onChanged.addListener((changes,area)=>{
     if(area!=="local")return;
     if(changes.device&&(changes.device.oldValue?.id!==changes.device.newValue?.id||changes.device.oldValue?.user!==changes.device.newValue?.user)){
-      sourceRun++;cancelRefresh();projectDrafts.clear();mappingScope="";targetsReady=false;
+      sourceRun++;cancelRefresh();projectDrafts.clear();sourceBindings.clear();mappingScope="";targetsReady=false;
       $("target-mappings").replaceChildren();
       stop=true;ownerChanged=true;if(step===3)work(renderTasks);else if(step===2)work(targets);else if(step===1)counts();}
     if(changes.jobs&&step===3)work(renderTasks);

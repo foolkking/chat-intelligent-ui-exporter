@@ -56,6 +56,23 @@ test("headings keep real Setext and ATX hierarchy but exclude fenced examples",(
     assert.deepEqual(JSON.parse(JSON.stringify(rows[0].headings)),[{text:"Title",level:1},{text:"Child",level:2},{text:"Last",level:2}]);
   }finally{p.close();}
 });
+test("statistic values and widget chrome are not chapters; meaningful numbered headings survive DOM and source merging",()=>{
+  const p=page(`<article data-message-id="a" data-message-author-role="assistant"><div class="markdown">
+    <h2>三维无人机状态空间规模</h2><div><small>状态数量</small><h2>9,000</h2></div>
+    <div><h3>54,000</h3><h3>0.216 MB</h3></div>
+    <div role="dialog"><h2>Settings</h2></div><div role="toolbar"><h2>Controls</h2></div>
+    <table><tr><td><h3>Table label</h3></td></tr></table><pre><h2>Example</h2></pre>
+    <h3>2. 状态设计</h3><h3>2026 年计划</h3><h3>100 MB 的容量限制</h3>
+    </div></article>`);
+  try{
+    const expected=["三维无人机状态空间规模","2. 状态设计","2026 年计划","100 MB 的容量限制"];
+    assert.deepEqual(Array.from(p.index.domRows()[0].headings,h=>h.text),expected);
+    const rows=p.index.fromBranch({messages:[{id:"a",role:"assistant",body:
+      "## 三维无人机状态空间规模\n## 9,000\n### 54,000\n### 0.216 MB\n### 2. 状态设计\n### 2026 年计划\n### 100 MB 的容量限制"}]});
+    assert.deepEqual(Array.from(rows[0].headings,h=>h.text),expected);
+    assert.deepEqual(Array.from(p.index.mergeMounted(rows)[0].headings,h=>h.text),expected);
+  }finally{p.close();}
+});
 test("file-backed navigation scans 50001 messages and a >2 MiB body without retaining bodies or dropping later matches",async()=>{
   const p=page();try{
     const rows=Array.from({length:50001},(_,i)=>p.index.metadata({id:`m${i}`,role:i%2?"assistant":"user",body:`Question ${i}`,headings:[],files:[]}));

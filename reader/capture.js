@@ -101,8 +101,8 @@
     };
   }
   function contentLength(headers){return !headers?.get("Content-Encoding")?Number(headers?.get("Content-Length"))||undefined:undefined;}
-  function readBranch(id,controller,request,check,report,batch=false,checkpoint){const marker=batch?undefined:leaf();return FastTextExporter.loadConversation({id,leafId:marker,fetch:request,
-    signal:controller.signal,retainRaw:false,sourcePaths:true,readerSource:ReaderSourceFile.conversation(id,marker,check,report,checkpoint)});}
+  function readBranch(id,controller,request,check,report,batch=false,checkpoint,navigation=false){const marker=batch?undefined:leaf();return FastTextExporter.loadConversation({id,leafId:marker,fetch:request,
+    signal:controller.signal,retainRaw:false,sourcePaths:true,readerSource:ReaderSourceFile.conversation(id,marker,check,report,checkpoint,navigation)});}
   function verifyVisible(data){
     if(!source.verify(data))throw problem("SOURCE_BRANCH_UNVERIFIED",text("无法确认当前分支。","Current branch could not be verified."));
   }
@@ -215,13 +215,13 @@
   globalThis.ReaderWorkspace?.({capture:save,busy:()=>!!cancelCapture});
   ReaderOverlay({busy:()=>!!cancelCapture,read:async(controller,onProgress=()=>{})=>{
     const route=location.pathname,id=pathId();if(!id)throw Error("No conversation");
-    const version=ReaderPageIndex.sample();
+    const version=ReaderPageIndex.sample(true);
     const changed=()=>problem("SOURCE_BRANCH_UNVERIFIED","Source changed");
     function check(){
       controller.signal.throwIfAborted();
       if(location.pathname!==route||ReaderPageIndex.revision()!==version)throw changed();
     }
-    function verifyVersion(){check();if(ReaderPageIndex.sample()!==version)throw changed();}
+    function verifyVersion(full=false){check();if(ReaderPageIndex.sample(full)!==version)throw changed();}
     // The parser owns a frozen Blob. Poll cancellation/revision inside it; fingerprint
     // the live transcript at each request, after branch selection and before publishing.
     let deadline=performance.now()+10;
@@ -231,21 +231,37 @@
       const turn=globalThis.scheduler?.yield?.()??new Promise(resolve=>setTimeout(resolve,0));
       return turn.then(()=>{check();deadline=performance.now()+10;});
     }
-    const request=sourceRequest(controller,verifyVersion,onProgress);
-    const data=await readBranch(id,controller,(...args)=>{onProgress({stage:"source"});return request(...args);},check,onProgress,false,checkpoint);
-    verifyVersion();verifyVisible(data);
+    const started=performance.now(),cost={sourceBytes:0,sourcePages:0,rows:0,indexConversions:0,bodyReads:0,chapterParses:0,fileReads:0};
+    const request=sourceRequest(controller,()=>verifyVersion(true),step=>{
+      if(step.sourceBytes!==undefined)cost.sourceBytes=step.sourceBytes;
+      if(step.sourcePages!==undefined)cost.sourcePages=step.sourcePages;
+      onProgress(step);
+    });
+    const data=await readBranch(id,controller,(...args)=>{onProgress({stage:"source"});return request(...args);},check,onProgress,false,checkpoint,true);
+    verifyVersion(true);if(source.identities().some(key=>!(data.identities||data.ids).has(key)))throw changed();
     const rows=[];let count=0;
     onProgress({stage:"messages",done:0});
-    for await(const m of data.rows()){
-      check();source.remember(m);rows.push(...ReaderPageIndex.fromBranch({messages:[m]}).map(ReaderPageIndex.metadata));
+    for await(const m of data.indexRows()){
+      check();rows.push({id:m.id,role:m.role,title:m.title,hasFiles:m.hasFiles,alias:m.sourcePath?.at(-1)});
       if(++count%32===0)onProgress({stage:"messages",done:count});
       const pause=checkpoint();if(pause)await pause;
     }
-    onProgress({stage:"messages",done:count});verifyVersion();verifyVisible(data);
-    return {rows,complete:!data.warnings?.length,loadBody:async(id,signal)=>{
-      signal?.throwIfAborted();verifyVersion();const row=await data.row(id);signal?.throwIfAborted();verifyVersion();
-      if(!row)throw Error("Message unavailable");return ReaderVisible(row,FastTextExporter).body||"";
-    }};
+    onProgress({stage:"messages",done:count});verifyVersion(true);
+    if(!source.bindNavigation(data,rows))throw changed();verifyVersion(true);
+    Object.assign(cost,{rows:count,indexConversions:data.cost.conversions,indexMs:performance.now()-started});
+    ReaderPageIndex.recordSource(cost);
+    async function loadBody(id,signal){
+      signal?.throwIfAborted();verifyVersion();cost.bodyReads++;const row=await data.row(id);signal?.throwIfAborted();verifyVersion();
+      if(!row)throw Error("Message unavailable");const body=ReaderVisible(row,FastTextExporter).body||"";
+      ReaderPageIndex.corroborate(row,body);return body;
+    }
+    return {rows,complete:!data.warnings?.length,loadBody,
+      loadChapters:async(id,signal)=>{const body=await loadBody(id,signal);signal?.throwIfAborted();cost.chapterParses++;return ReaderPageIndex.headings(body);},
+      loadFiles:async(id,signal)=>{
+        signal?.throwIfAborted();verifyVersion();cost.fileReads++;const m=await data.rawMessage(id);
+        signal?.throwIfAborted();verifyVersion();if(!m)throw Error("Message unavailable");
+        return ReaderPageIndex.assetFiles(FastTextExporter.assetsOf(m));
+      }};
   }});
   ReaderSourceControl({pathId,capture:save,cancel:()=>cancelCapture?.()});
 })();

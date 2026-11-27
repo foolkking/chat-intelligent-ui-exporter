@@ -32,6 +32,22 @@ function fixture(){
   return {w,long,requests,progress,rawBytes:Buffer.byteLength(raw),read:(ctl,observe)=>overlay.read(ctl,step=>{progress.push(step);observe?.(step);}),close:()=>w.close()};
 }
 
+test("global navigation indexes the branch without full conversions; chapter and file reads stay independent",async t=>{
+  const f=fixture();try{
+    const api=f.w.FastTextExporter,original=api.records;let conversions=0;
+    api.records=(messages,options)=>{conversions+=messages.length;return original(messages,options);};
+    const data=await f.read(new AbortController());
+    assert.equal(conversions,0,"global conversion count");
+    assert.ok(data.rows.every(row=>!row.headings&&!row.sections&&!row.files));
+    assert.equal(data.rows[0].title.length,220);assert.equal(data.rows[3].title,"");
+    const chapters=await data.loadChapters("m3");assert.equal(chapters.length,0);
+    assert.equal(conversions,1);
+    assert.equal((await data.loadFiles("m126")).length,0);assert.equal(conversions,1);
+    const metrics=f.w.ReaderPageIndex.metrics();assert.equal(metrics.source.indexConversions,0);
+    assert.equal(metrics.source.rows,129);assert.equal(metrics.source.chapterParses,1);
+    t.diagnostic(JSON.stringify({fixture:"129-source-messages",...metrics.source}));
+  }finally{f.close();}
+});
 test("latest capture navigation keeps metadata only, reuses one Blob, and search cancellation does not invalidate later random reads",async()=>{
   const f=fixture();try{
     const owner=new AbortController(),data=await f.read(owner),index=f.w.ReaderPageIndex;

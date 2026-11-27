@@ -1,6 +1,7 @@
 // Both production parsers consume identical in-memory synthetic page bytes. No browser or network.
 const test=require("node:test"),assert=require("node:assert/strict");
 const api=require("../extension/fast-text.js");require("../reader/source-file.js");
+require("../reader/visible.js");
 const msg=(id,text)=>({id,author:{role:"user"},create_time:1,content:{content_type:"text",parts:[text]},metadata:{
   request_id:"synthetic-request-a",attachments:[{id:"file-synthetic",name:"sample.csv",size:9}]}});
 async function parse(pages,range){
@@ -77,4 +78,39 @@ test("a displayed message alias repeated on two branches does not select whichev
     root:{parent:null,children:["n1","n2"]},n1:{parent:"root",children:[],message:m},n2:{parent:"root",children:[],message:{...m,channel:"commentary"}}}};
   await assert.rejects(ReaderSourceFile.conversation("synthetic","repeated",()=>{}).tree({readerFile:async()=>new Blob([JSON.stringify(data)])}),
     e=>e.code==="SOURCE_BRANCH_UNVERIFIED");
+});
+test("light tree and paginated indices agree with the full converter on branch order, tool output, hidden and empty records",async()=>{
+  const raw=(id,role,parts,extra={})=>({id,author:{role},content:{content_type:"text",parts},...extra});
+  const items=[raw("q","user",["Prompt"]),raw("hide","assistant",["Hidden"],{metadata:{is_visually_hidden_from_conversation:true}}),
+    raw("analysis","assistant",["Hidden"],{channel:"analysis"}),raw("recipient","assistant",["Hidden"],{recipient:"tool"}),
+    raw("empty","assistant",["   "]),raw("removed","assistant",["XYZ"],{metadata:{content_references:[{matched_text:"XYZ"}]}}),
+    raw("static","assistant",["program"],{metadata:{model_dil_v2:{fallbackMarkdown:"## Static",compiled:"private program"}}}),
+    raw("plot","tool",[{asset_pointer:"sediment://file-plot"}]),raw("table","tool",[],{metadata:{ada_visualizations:[{type:"table",file_id:"table-id"}]}}),
+    raw("tool","tool",["Private tool text"]),raw("image","assistant",[{asset_pointer:"unhandled://image"}]),
+    raw("unsupported","assistant",[{content_type:"unknown"}]),raw("chip","user",[],{metadata:{attachments:[{id:"file-c",name:"c.pdf"}]}})];
+  const expected=api.records(items),mapping=Object.fromEntries(items.map((m,i)=>["n"+i,{parent:i?"n"+(i-1):null,children:i+1<items.length?["n"+(i+1)]:[],message:m}]));
+  mapping.n0.children.push("other");mapping.other={parent:"n0",children:[],message:raw("other","assistant",["Other branch"])};
+  const response=data=>({readerFile:async()=>new Blob([JSON.stringify(data)])});
+  for(const shape of ["tree","pages"]){
+    const adapter=ReaderSourceFile.conversation("synthetic",null,()=>{},()=>{},undefined,true);let data;
+    if(shape==="tree")data=await adapter.tree(response({current_node:"n"+(items.length-1),mapping}));
+    else{await adapter.page(response({messages:items.slice(5),page_info:{has_previous_page:true,start_cursor:"second"}}),1);
+      data=(await adapter.page(response({messages:items.slice(0,6),page_info:{has_previous_page:false}}),2)).result;}
+    const index=await Array.fromAsync(data.indexRows());
+    assert.deepEqual(index.map(r=>[r.id,r.role,r.hasFiles]),expected.messages.map(m=>[m.id,m.role,!!(m.images?.length||m.tables?.length||m.attachments?.length)]));
+    assert.equal(!!data.warnings.length,!!expected.warnings.length);assert.ok(!JSON.stringify(index).includes("program"));
+    if(shape==="tree")for(const row of index)assert.equal(row.sourcePath.at(-1),"n"+items.findIndex(m=>m.id===row.id));
+  }
+});
+test("interleaved random page reads publish each shared byte cache atomically",async()=>{
+  const pending=[],cache={start:-1,window:new Uint8Array()};
+  const make=value=>{
+    const bytes=Buffer.from(JSON.stringify(value));
+    return {size:bytes.length,slice:()=>({arrayBuffer:()=>new Promise(resolve=>pending.push(()=>resolve(bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength))))})};
+  };
+  const a=make({id:"a"}),b=make({id:"another-page-b"}),readA=ReaderSourceFile.fileReader(a,cache),readB=ReaderSourceFile.fileReader(b,cache);
+  const first=readA(0,a.size),second=readB(0,b.size);
+  pending[1]();assert.deepEqual(await second,{id:"another-page-b"});
+  pending[0]();assert.deepEqual(await first,{id:"a"});
+  const again=readB(0,b.size);pending[2]();assert.deepEqual(await again,{id:"another-page-b"});
 });

@@ -1,3 +1,63 @@
+// One model per checked source. Source bytes remain in its provider. Only a
+// confirmed landing (or the verified initial reading position) moves the window.
+globalThis.ReaderChapterWindow=({rows,load,valid,patch,error})=>{
+  const turns=[],order=new Map(),owner=new Map(),cache=new Map(),pending=new Map();
+  let center=-1,allowed=new Set(),generation=0,controller=new AbortController();
+  for(const [i,row] of rows.entries()){
+    if(row.role==="user"||!turns.length)turns.push({q:row.role==="user"?row:null,answers:[]});
+    if(row.role!=="user")turns.at(-1).answers.push(row);
+    order.set(row.id,i);owner.set(row.id,turns.length-1);
+  }
+  const first=i=>turns[i]?.q||turns[i]?.answers[0];
+  const equal=(a,b)=>a.length===b.length&&a.every((h,i)=>h.text===b[i].text&&h.level===b[i].level);
+  function refresh(id,changes){
+    const item=cache.get(id),row=rows[order.get(id)],stamp=ReaderPageIndex.renderState(id);
+    if(!item||item.stamp?.node===stamp.node&&item.stamp?.version===stamp.version)return;
+    const headings=ReaderPageIndex.localHeadings(row,item.source);
+    item.stamp=stamp;
+    if(!item.detail||!equal(headings,item.detail.headings)){
+      item.detail={id,headings,sections:ReaderPageIndex.sections({id,headings})};changes.set(id,item.detail);
+    }
+  }
+  function pause(){generation++;controller.abort();controller=new AbortController();pending.clear();}
+  function request(id){
+    const index=owner.get(id);if(!allowed.has(index)||!valid())return Promise.resolve();
+    const turn=turns[index],token=generation,signal=controller.signal;
+    const active=()=>generation===token&&!signal.aborted&&allowed.has(index)&&valid();
+    const read=async row=>{
+      const headings=await load(row.id,signal);if(!active())return;
+      cache.set(row.id,{source:headings});const updates=new Map();refresh(row.id,updates);patch(updates);
+    };
+    return (async()=>{
+      let budget=performance.now()+8;
+      // A later answer in a multi-answer turn can itself be the clicked target.
+      const selected=turn.answers.find(a=>a.id===id);
+      for(const row of selected?[selected,...turn.answers.filter(a=>a!==selected)]:turn.answers){
+        if(!active())break;if(cache.has(row.id))continue;
+        if(!pending.has(row.id))pending.set(row.id,read(row).finally(()=>{if(generation===token)pending.delete(row.id);}));
+        try{await pending.get(row.id);}catch(e){if(active())error(e);}
+        if(performance.now()>=budget){await new Promise(resolve=>setTimeout(resolve,0));budget=performance.now()+8;}
+      }
+    })();
+  }
+  function move(id){
+    const index=owner.get(id);if(index===undefined||!valid())return;
+    if(index!==center){
+      pause();const old=center;center=index;allowed=new Set();
+      for(let i=Math.max(0,index-1);i<=Math.min(turns.length-1,index+2);i++)allowed.add(i);
+      const updates=new Map();
+      for(const key of cache.keys())if(!allowed.has(owner.get(key))){cache.delete(key);updates.set(key,null);}
+      for(const key of cache.keys())refresh(key,updates);
+      patch(updates,{open:first(center).id,close:first(old<0?0:old)?.id});
+    }
+    return request(id);
+  }
+  return {turns,order,owner,move,request,pause,center:()=>center,detail:id=>cache.get(id)?.detail,
+    snapshot:()=>new Map([...cache].map(([id,item])=>[id,item.detail])),
+    expanded:()=>Array.from(allowed,i=>first(i).id),centerId:()=>first(center)?.id,
+    refresh(){if(!valid())return;const updates=new Map();for(const id of cache.keys())refresh(id,updates);if(updates.size)patch(updates);}};
+};
+
 // Transient metadata-only navigation. The owner performs body reads and verified
 // source jumps; expanding/revealing this tree never scrolls the conversation.
 globalThis.ReaderOutlineTree = ({container,zh=false,onLocate=()=>{},onPreview=()=>{},onBeforeRender=()=>{},onChange=()=>{}}) => {
@@ -30,6 +90,7 @@ globalThis.ReaderOutlineTree = ({container,zh=false,onLocate=()=>{},onPreview=()
   `;
   let nodes=new Map(),roots=[],visible=[],positions=new Map(),offsets=[0],expanded=new Map(),heights=new Map();
   let activeKey=null,focusKey=null,dead=false,scheduled=0,rendered=[],windowStart=-1,version=0,renderedVersion=-1;
+  const renderedNode=new WeakMap();
   const targetKey=target=>!target?.id?null:JSON.stringify(target.heading===undefined?["message",target.id]:["section",target.id,target.heading]);
   const isOpen=node=>node.children.length&&expanded.get(node.key)!==false;
   const owns=()=>root.parentElement===container;
@@ -58,7 +119,7 @@ globalThis.ReaderOutlineTree = ({container,zh=false,onLocate=()=>{},onPreview=()
       button.classList.toggle("active",current);button.classList.toggle("current-path",path.has(key));
       const node=nodes.get(key);if(node?.children.length){
         button.setAttribute("aria-expanded",String(!!isOpen(node)));button.querySelector(".outline-fold").textContent=isOpen(node)?"▾":"▸";
-      }
+      }else if(button.hasAttribute("aria-expanded")){button.removeAttribute("aria-expanded");button.querySelector(".outline-fold").textContent="";}
       button.tabIndex=key===focusKey?0:-1;
     }
   }
@@ -84,10 +145,10 @@ globalThis.ReaderOutlineTree = ({container,zh=false,onLocate=()=>{},onPreview=()
   function toggle(node,open){
     if(dead||!node.children.length)return;
     expanded.set(node.key,open);flatten();focusKey=node.key;
-    show(node.key,true);onChange({kind:"expansion",expanded:open});
+    show(node.key,true);onChange({kind:"expansion",expanded:open,target:node.target});
   }
   function keydown(event,node){
-    if(dead||!owns()||!event.isTrusted)return;
+    if(dead||!owns()||nodes.get(node.key)!==node||!event.isTrusted)return;
     const index=positions.get(node.key);if(index===undefined)return;
     let next;
     switch(event.key){
@@ -120,15 +181,14 @@ globalThis.ReaderOutlineTree = ({container,zh=false,onLocate=()=>{},onPreview=()
     button.append(make("span","outline-label",node.label));row.append(button);
     const fold=make("span","outline-fold",node.children.length?(isOpen(node)?"▾":"▸"):"");
     fold.setAttribute("aria-hidden","true");
-    if(node.children.length){
-      fold.onclick=e=>{if(!dead&&owns()&&e.isTrusted){e.stopPropagation();toggle(node,!isOpen(node));}};
-    }
+    const live=()=>!dead&&owns()&&root.contains(button)&&nodes.get(node.key)===node;
+    fold.onclick=e=>{if(node.children.length&&live()&&e.isTrusted){e.stopPropagation();toggle(node,!isOpen(node));}};
     button.prepend(fold);
     button.onfocus=()=>{focusKey=node.key;mark();};
-    button.onclick=e=>{if(!dead&&owns()&&e.isTrusted){e.stopPropagation();focusKey=node.key;mark();onLocate({...node.target},button);}};
-    button.onkeydown=e=>keydown(e,node);
+    button.onclick=e=>{if(live()&&e.isTrusted){e.stopPropagation();focusKey=node.key;mark();onLocate({...node.target},button);}};
+    button.onkeydown=e=>{if(live())keydown(e,node);};
     if(node.kind==="question")onPreview(node.row,button,row);
-    observer?.observe(row);rendered.push(button);return row;
+    observer?.observe(row);renderedNode.set(button,node);return button;
   }
   function render(){
     if(dead)return;
@@ -138,16 +198,26 @@ globalThis.ReaderOutlineTree = ({container,zh=false,onLocate=()=>{},onPreview=()
     // Scrolling within the mounted window must not tear down an on-demand
     // question preview or move keyboard focus.
     if(owns()&&first===windowStart&&version===renderedVersion&&rendered.length===windowNodes.length&&
-      rendered.every((button,i)=>button.dataset.key===windowNodes[i].key)){mark();return;}
-    onBeforeRender();observer?.disconnect();
+      rendered.every((button,i)=>renderedNode.get(button)===windowNodes[i])){mark();return;}
+    const keep=new Set(windowNodes),prior=new Map();
+    for(const button of rendered)if(keep.has(renderedNode.get(button)))prior.set(renderedNode.get(button),button);
+    if(prior.size!==rendered.length||!owns())onBeforeRender();
+    for(const button of rendered)if(!keep.has(renderedNode.get(button))){observer?.unobserve?.(button.parentElement);button.parentElement.remove();}
     windowStart=first;renderedVersion=version;
     if(!windowNodes.some(node=>node.key===focusKey))focusKey=windowNodes[0]?.key||null;
-    rendered=[];
-    root.replaceChildren(style,before,...windowNodes.map(rowElement),after);
+    if(!before.parentElement)root.append(style,before,after);
+    root.querySelector(".outline-empty")?.remove();
+    rendered=windowNodes.map(node=>prior.get(node)||rowElement(node));
+    let anchor=before;
+    for(const button of rendered){
+      const row=button.parentElement;
+      if(anchor.nextSibling!==row)root.insertBefore(row,anchor.nextSibling);
+      anchor=row;
+    }
     if(!visible.length)root.insertBefore(make("p","outline-empty",L("没有消息。","No messages.")),after);
     if(!owns())container.replaceChildren(root);
     mark();
-    if(previous)(rendered.find(button=>button.dataset.key===previous)||rendered.find(button=>button.dataset.key===focusKey))?.focus({preventScroll:true});
+    if(previous)rendered.find(button=>button.dataset.key===focusKey)?.focus({preventScroll:true});
   }
   function show(key,focus=false){
     if(dead||!nodes.has(key))return false;
@@ -161,14 +231,40 @@ globalThis.ReaderOutlineTree = ({container,zh=false,onLocate=()=>{},onPreview=()
     if(focus)rendered.find(button=>button.dataset.key===key)?.focus({preventScroll:true});
     return true;
   }
-  function setRows(rows){
+  function add(key,kind,target,label,parent,row){
+    const node={key,kind,target,label,parent,row,level:(parent?.level||0)+1,children:[]};
+    nodes.set(key,node);(parent?.children||roots).push(node);return node;
+  }
+  function addSections(parent,sections){
+    const added=[];
+    for(const section of sections){
+      const owner=section.parent===null?parent:added[section.parent];
+      added[section.index]=add(targetKey(section.target),"section",{...section.target},section.text,owner);
+    }
+    for(const node of [parent,...added])node.children.forEach((child,i)=>{child.position=i+1;child.siblings=node.children.length;});
+  }
+  function patchChapters(updates,window){
+    if(dead)return;
+    for(const [id,detail] of updates){
+      const parent=nodes.get(targetKey({id}));if(!parent)continue;
+      const active=nodes.get(activeKey),focus=nodes.get(focusKey);
+      const stack=parent.children.splice(0);
+      while(stack.length){const old=stack.pop();stack.push(...old.children);nodes.delete(old.key);heights.delete(old.key);expanded.delete(old.key);}
+      if(detail)addSections(parent,detail.sections);
+      // A reused ordinal may now name another chapter. Preserve the owning
+      // answer until its actual current heading has been re-verified.
+      if(active&&nodes.get(activeKey)!==active)activeKey=parent.key;
+      if(focus&&nodes.get(focusKey)!==focus)focusKey=parent.key;
+    }
+    if(window){
+      if(window.close)expanded.set(JSON.stringify(["turn",window.close]),false);
+      expanded.set(JSON.stringify(["turn",window.open]),true);
+    }
+    if(updates.size||window){flatten();if(owns())render();}
+  }
+  function setRows(rows,turns=ReaderPageIndex.tree(rows)){
     if(dead)return;
     const priorFocus=focusedKey();nodes=new Map();roots=[];version++;
-    const add=(key,kind,target,label,parent,row)=>{
-      const node={key,kind,target,label,parent,row,level:(parent?.level||0)+1,children:[]};
-      nodes.set(key,node);(parent?.children||roots).push(node);return node;
-    };
-    const turns=ReaderPageIndex.tree(rows);
     turns.forEach((turn,i)=>{
       const first=turn.q||turn.answers[0];if(!first)return;
       const root=add(JSON.stringify(["turn",first.id]),"turn",{id:first.id},
@@ -176,11 +272,8 @@ globalThis.ReaderOutlineTree = ({container,zh=false,onLocate=()=>{},onPreview=()
       if(!expanded.has(root.key))expanded.set(root.key,i===0);
       if(turn.q)add(targetKey({id:turn.q.id}),"question",{id:turn.q.id},L("提问","Question")+" · "+turn.q.title,root,turn.q);
       turn.answers.forEach((answer,i)=>{
-        const parent=add(targetKey({id:answer.id}),"answer",{id:answer.id},L(`回答 ${i+1}`,`Answer ${i+1}`),root),sections=[];
-        for(const section of answer.sections){
-          sections[section.index]=add(targetKey(section.target),"section",{...section.target},section.text,
-            section.parent===null?parent:sections[section.parent],undefined);
-        }
+        const parent=add(targetKey({id:answer.id}),"answer",{id:answer.id},L(`回答 ${i+1}`,`Answer ${i+1}`),root);
+        if(answer.sections?.length)addSections(parent,answer.sections);
       });
     });
     for(const node of nodes.values())node.children.forEach((child,i)=>{child.position=i+1;child.siblings=node.children.length;});
@@ -195,7 +288,7 @@ globalThis.ReaderOutlineTree = ({container,zh=false,onLocate=()=>{},onPreview=()
   function setActive(target,options={}){
     if(dead)return;
     const key=targetKey(target),prior=activeKey;activeKey=nodes.has(key)?key:null;
-    if(activeKey!==prior&&activeKey&&!options.reveal&&!options.focus){
+    if(activeKey!==prior&&activeKey&&options.follow!==false&&!options.reveal&&!options.focus){
       let changed=false;
       for(let parent=nodes.get(activeKey).parent;parent;parent=parent.parent)
         if(!isOpen(parent)){expanded.set(parent.key,true);changed=true;}
@@ -217,5 +310,5 @@ globalThis.ReaderOutlineTree = ({container,zh=false,onLocate=()=>{},onPreview=()
     nodes.clear();roots=[];visible=[];positions.clear();offsets=[];expanded.clear();heights.clear();rendered=[];
   }
   container.addEventListener("scroll",schedule,{passive:true});
-  return {setRows,render,setActive,setAll,reveal:(target,options={})=>show(targetKey(target),!!options.focus),destroy};
+  return {setRows,patchChapters,render,setActive,setAll,reveal:(target,options={})=>show(targetKey(target),!!options.focus),destroy};
 };

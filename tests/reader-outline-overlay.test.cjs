@@ -3,7 +3,7 @@ const {JSDOM}=require("jsdom"),repo=path.resolve(__dirname,".."),tick=()=>new Pr
 const rows=[{id:"q",role:"user",title:"Synthetic question",headings:[],files:[]},
   {id:"a",role:"assistant",title:"Synthetic answer",headings:[{level:2,text:"Same"},{level:3,text:"Nested"},{level:2,text:"Same"}],files:[{name:"x.pdf",id:"file-x",type:"file"}]},
   {id:"b",role:"assistant",title:"Headingless answer",headings:[],files:[]}];
-async function fixture({complete=true,current={id:"a",heading:1}}={}){
+async function fixture({complete=true,current={id:"a",heading:1},provider={},jump}={}){
   const dom=new JSDOM("<main></main>",{url:"https://chatgpt.com/c/synthetic-outline-overlay",runScripts:"outside-only",pretendToBeVisual:true}),w=dom.window;
   const roots=[],observers=[],errors=[],jumps=[],reads=[];let result={ok:true,kind:"heading"},finish;
   const attach=w.Element.prototype.attachShadow;w.Element.prototype.attachShadow=function(options){const root=attach.call(this,options);roots.push(root);return root;};
@@ -14,8 +14,8 @@ async function fixture({complete=true,current={id:"a",heading:1}}={}){
     w.eval(fs.readFileSync(path.join(repo,file),"utf8"));
   w.ReaderPageIndex.observeLayout=()=>{};w.ReaderPageIndex.layout=()=>({height:900,edge:800,top:0,compact:false});
   w.ReaderPageIndex.visible=()=>current?.id;w.ReaderPageIndex.currentSection=()=>current;
-  w.ReaderPageIndex.jump=async(_rows,target)=>{jumps.push(JSON.parse(JSON.stringify(target)));if(result===null)return new Promise(resolve=>{finish=resolve;});return result;};
-  w.ReaderOverlay({busy:()=>false,read:async()=>({rows,complete,loadBody:async id=>{reads.push(id);return "Full synthetic question";}})});
+  w.ReaderPageIndex.jump=async(_rows,target,signal)=>{jumps.push(JSON.parse(JSON.stringify(target)));if(jump)return jump(target,signal);if(result===null)return new Promise(resolve=>{finish=resolve;});return result;};
+  w.ReaderOverlay({busy:()=>false,read:async()=>({rows,complete,loadBody:async id=>{reads.push(id);return "Full synthetic question";},...provider})});
   const root=roots[0],click=node=>node.onclick({isTrusted:true,stopPropagation(){}});
   click(root.querySelector(".handle"));await tick();await tick();
   const item=(id,heading)=>[...root.querySelectorAll('[role="treeitem"]')].find(el=>el.dataset.mid===id&&el.dataset.kind!=="turn"&&
@@ -61,5 +61,58 @@ test("question previews remain demand-driven after tree integration and abort/re
     assert.deepEqual(f.reads,["q"]);assert.equal(f.root.querySelector(".question-preview .body").textContent,"Full synthetic question");
     f.click(f.root.querySelectorAll("nav button")[1]);assert.equal(f.root.querySelector(".question-preview"),null);
     f.click(f.root.querySelectorAll("nav button")[0]);assert.deepEqual(f.reads,["q"]);assert.ok(f.item("q"));
+  }finally{f.close();}
+});
+function longProvider(){
+  const chapterReads=[],fileReads=[],bodyReads=[],rows=[];
+  for(let i=0;i<12;i++)for(const role of ["user","assistant"]){
+    const id=(role==="user"?"q":"a")+i;rows.push({id,role,title:id,hasFiles:id==="a10"});
+  }
+  return {chapterReads,fileReads,bodyReads,provider:{rows,
+    loadChapters:async id=>{chapterReads.push(id);return [{text:`Section of ${id}`,level:3}];},
+    loadFiles:async id=>{fileReads.push(id);return [{name:"Outside.pdf",type:"file",id:"file-one"}];},
+    loadBody:async id=>{bodyReads.push(id);return id==="a11"?"Needle in last answer":"Other body";}}};
+}
+test("scroll and failed jumps keep the chapter window; a late first click cannot replace a second successful landing",async()=>{
+  const {provider,chapterReads}=longProvider();let late,oldSignal;
+  const f=await fixture({current:{id:"a3"},provider,jump:async(target,signal)=>{
+    if(target.id==="q6"){oldSignal=signal;return new Promise(resolve=>{late=resolve;});}
+    return target.id==="q5"?{ok:false,reason:"target"}:{ok:true,kind:"message"};
+  }});try{
+    const turn=id=>f.root.querySelector(`.outline-node[data-kind="turn"][data-mid="${id}"]`);
+    assert.deepEqual(chapterReads,["a3"]);const original=f.item("a3",0);
+    f.setCurrent({id:"a10"});f.w.dispatchEvent(new f.w.Event("scroll"));await new Promise(r=>setTimeout(r,110));
+    assert.deepEqual(chapterReads,["a3"]);assert.equal(f.item("a3",0),original);
+    f.click(turn("q5"));await tick();assert.equal(f.item("a3",0),original);
+    f.click(turn("q6"));await tick();f.click(turn("q9"));await tick();
+    assert.equal(oldSignal.aborted,true);late({ok:true,kind:"message"});await tick();
+    assert.deepEqual(chapterReads,["a3","a9"]);assert.ok(f.item("a9",0));assert.equal(f.item("a3",0),undefined);
+  }finally{f.close();}
+});
+test("sparse file lookup and full search reach beyond the chapter window without parsing those chapters",async()=>{
+  const {provider,chapterReads,fileReads,bodyReads}=longProvider();
+  const f=await fixture({current:{id:"a1"},provider});try{
+    assert.deepEqual(fileReads,[]);f.click(f.root.querySelectorAll("nav button")[1]);await tick();
+    assert.equal(f.root.querySelector(".result").dataset.mid,"a10");assert.deepEqual(fileReads,["a10"]);
+    f.click(f.root.querySelectorAll("nav button")[2]);const query=f.root.querySelector("input[type=search]");query.value="Needle";query.oninput();
+    await new Promise(r=>setTimeout(r,190));assert.equal(f.root.querySelector(".result").dataset.mid,"a11");
+    assert.equal(new Set(bodyReads).size,24);assert.deepEqual(chapterReads,["a1"]);
+  }finally{f.close();}
+});
+test("a chapter fallback highlights the owning answer and keeps its explanation visible",async()=>{
+  const f=await fixture();try{
+    f.setResult({ok:true,kind:"answer-fallback"});f.click(f.item("a",2));await tick();
+    assert.equal(f.item("a").getAttribute("aria-current"),"location");
+    assert.equal(f.root.querySelector("[data-heading][aria-current]"),null);
+    assert.match(f.root.querySelector(".status").textContent,/owning answer.*chapter could not be verified/i);
+  }finally{f.close();}
+});
+test("late cleanup of the previous jump cannot clear the current click's busy state on a reused tree node",async()=>{
+  const waits=[];
+  const f=await fixture({jump:()=>new Promise(resolve=>waits.push(resolve))});try{
+    const owner=f.item("a",2);f.click(owner);await tick();f.click(owner);await tick();
+    waits[0]({ok:false,reason:"target"});await tick();
+    assert.equal(owner.getAttribute("aria-busy"),"true");
+    waits[1]({ok:true,kind:"heading"});await tick();assert.equal(owner.hasAttribute("aria-busy"),false);
   }finally{f.close();}
 });

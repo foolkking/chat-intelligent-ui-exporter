@@ -63,6 +63,101 @@ function fixture(){
 async function locate(f,rows,target={id:"a"},ctl=new AbortController()){
   return f.index.jump(rows,target,ctl.signal);
 }
+for(const history of [false,true])test(`scroll-gated chapter hydrates from a ${history?"paginated":"mounted"} placeholder`,async()=>{
+  const f=fixture();try{
+    const root=f.root(),rows=f.rows(["a","later"]),target={id:"a",heading:0};
+    rows[0].headings=[{text:"Distant chapter",level:3}];
+    let answer,opened=false;
+    const placeholder=()=>{answer=f.message(root,"a",4000,'<div data-response-body hidden></div>');};
+    if(history){root.scrollTop=8000;f.message(root,"later",8020);}else placeholder();
+    f.verify(rows);
+    root.onMove=()=>{
+      if(!answer){root.replaceChildren();placeholder();return;}
+      const rect=answer.getBoundingClientRect();
+      if(!opened&&rect.top<680&&rect.bottom>12){
+        opened=true;
+        f.hooks.set(f.frame+3,()=>{answer.innerHTML='<div data-response-body><h3 data-offset="250" data-zero> Distant chapter </h3></div>';});
+        f.hooks.set(f.frame+7,()=>{const replacement=answer.cloneNode(true);answer.replaceWith(replacement);answer=replacement;
+          delete answer.querySelector("h3").dataset.zero;answer.dataset.y="4300";root.scrollTop-=120;});
+      }
+    };
+    const result=await locate(f,rows,target);
+    assert.equal(result.kind,"heading",`render trigger=${opened}, scroll writes=${f.scrolls.length}, result=${JSON.stringify(result)}`);
+    assert.ok(opened&&f.frame>=15);const r=answer.querySelector("h3").getBoundingClientRect();
+    assert.ok(r.top>300&&r.bottom<700);
+  }finally{f.close();}
+});
+test("a stable empty placeholder never counts as an answer, while a verified body permits explicit chapter fallback",async()=>{
+  for(const ready of [false,true]){
+    const f=fixture();try{
+      const root=f.root(),rows=f.rows();rows[0].headings=[{text:"Unavailable chapter",level:2}];
+      const msg=f.message(root,"a",4000,ready?"<p>Answer</p>":'<span class="sr-only" data-conversation-role="assistant">Assistant</span><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="4"/></svg>');
+      f.verify(rows);const result=await locate(f,rows,ready?{id:"a",heading:0}:{id:"a"});
+      assert.equal(result.ok,ready,JSON.stringify(result));
+      if(ready){assert.equal(result.kind,"answer-fallback");assert.ok(msg.firstChild.getBoundingClientRect().top<680);}
+    }finally{f.close();}
+  }
+});
+test("a CSS-skipped mapping alias is preparation-only and an ancestor hidden by the page stays untouched",async()=>{
+  for(const hidden of [false,true]){
+    const f=fixture();try{
+      const root=f.root(),rows=f.rows(),msg=f.message(root,"node-a",3300,"<h3>Chapter</h3>");
+      rows[0].alias="node-a";rows[0].sourcePath=["node-a"];rows[0].headings=[{level:3,text:"Chapter"}];
+      msg.style.contentVisibility="hidden";f.source.remember(rows[0]);
+      assert.equal(f.source.verify({identities:new Set(["a","node-a"])}),true);
+      if(hidden)msg.hidden=true;
+      root.onMove=()=>{if(msg.getBoundingClientRect().top<680)msg.style.contentVisibility="visible";};
+      const result=await locate(f,rows,{id:"a",heading:0});
+      assert.equal(result.ok,!hidden);
+      if(hidden)assert.equal(f.scrolls.length,0);else assert.equal(result.kind,"heading");
+    }finally{f.close();}
+  }
+});
+test("a live partial body can finish in the same shell only when its complete source corroborates it",async()=>{
+  for(const tail of ["Last paragraph","Wrong paragraph"]){
+    const f=fixture();try{
+      const root=f.root(),rows=f.rows(),msg=f.message(root,"a",2300,"<p>First paragraph</p>");
+      Object.assign(rows[0],{body:"First paragraph\n\n### Actual\n\nLast paragraph",headings:[{level:3,text:"Actual"}]});f.verify(rows);
+      root.onMove=()=>{if(msg.childElementCount===1)msg.insertAdjacentHTML("beforeend",`<h3>Actual</h3><p>${tail}</p>`);};
+      const result=await locate(f,rows,{id:"a",heading:0});
+      assert.equal(result.ok,tail==="Last paragraph");if(result.ok)assert.equal(result.kind,"heading");
+    }finally{f.close();}
+  }
+});
+test("reordering a unique landmark between identical headings prevents an ordinal-only match",()=>{
+  const f=fixture();try{
+    const root=f.root(),msg=f.message(root,"a",12,"<h2>Middle</h2><h2>Same</h2><h2>Same</h2>"),rows=f.rows();
+    rows[0].headings=["Same","Middle","Same"].map(text=>({level:2,text}));
+    assert.equal(f.index.destination(msg,rows[0],{heading:0}),null);
+  }finally{f.close();}
+});
+test("CSS resumes painting without DOM mutations and a late semantic level is fused without renumbering the requested title",async()=>{
+  const f=fixture();try{
+    const root=f.root(),rows=f.rows(),msg=f.message(root,"a",3300,'<div data-response-body><h2>Widget</h2><h3 data-offset="180">Requested</h3></div>');
+    rows[0].headings=[{text:"Requested",level:2}];let resumed=false;
+    f.w.Element.prototype.checkVisibility=function(){
+      return !this.closest('[data-message-id="a"]')||resumed;
+    };
+    f.source.remember(rows[0]);f.verify(rows);
+    assert.equal(f.source.mounted().length,0);
+    root.onMove=()=>{resumed=msg.getBoundingClientRect().top<680;};
+    const result=await locate(f,rows,{id:"a",heading:0});
+    assert.equal(result.ok,true);assert.equal(result.kind,"heading");assert.ok(resumed);
+    assert.ok(msg.querySelector("h3").getBoundingClientRect().top>450);
+    assert.equal(rows[0].headings[0].level,2,"source metadata is immutable");
+  }finally{f.close();}
+});
+test("a stationary jump checks identities at boundaries, not every animation frame",async t=>{
+  const f=fixture();try{
+    const root=f.root({size:30000}),rows=f.rows(Array.from({length:80},(_,i)=>"m"+i));
+    rows.forEach((r,i)=>f.message(root,r.id,i*300));f.verify(rows);
+    const result=await locate(f,rows,{id:"m70"});
+    assert.equal(result.ok,true);assert.ok(f.frame>=8);
+    assert.ok(result.metrics.inventoryScans<=2,JSON.stringify(result.metrics));
+    assert.ok(result.metrics.bodyChecks<=160,JSON.stringify(result.metrics));
+    t.diagnostic(JSON.stringify({fixture:"80-mounted-synthetic-messages",frames:f.frame,...result.metrics}));
+  }finally{f.close();}
+});
 test("combine source chapters with unique mounted structured titles and keep API-only chapters",()=>{
   const f=fixture();try{
     const root=f.root(),msg=f.message(root,"a",0,'<h2>First</h2><div data-heading-level="3">DOM only</div><p><b>Not a title</b></p><h2>Last</h2>');

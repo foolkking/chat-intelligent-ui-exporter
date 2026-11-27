@@ -35,10 +35,42 @@ globalThis.ReaderPageIndex = (() => {
     return items.map(f=>{const row=typeof f==="string"?{name:f}:f,key=row.name;
       const occurrence=seen.get(key)||0;seen.set(key,occurrence+1);return {...row,occurrence};});
   }
-  function domRows(){
+  const ignoredBody='script,style,button,textarea,nav,form,.sr-only,.katex-mathml,[hidden],[inert],[aria-hidden=true],[data-conversation-role],[role=status],[role=progressbar],[role=toolbar]';
+  const hasBox=node=>node&&[...node.getClientRects()].some(r=>r.width>0&&r.height>0);
+  const painted=node=>source.visible(node)&&(!node.checkVisibility||node.checkVisibility({contentVisibilityAuto:true,visibilityProperty:true,opacityProperty:true}))&&hasBox(node);
+  // Only a laid-out piece of answer content can certify readiness. The shell
+  // remains usable as a scroll anchor even when its subtree hasn't been painted.
+  function firstContent(el){
+    if(source.pending(el))return null;
+    const body=surface(el),walker=document.createTreeWalker(body,NodeFilter.SHOW_TEXT|NodeFilter.SHOW_ELEMENT,{
+      acceptNode(n){
+        if(n.nodeType===1&&n.matches(ignoredBody))return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    for(let n=walker.nextNode();n;n=walker.nextNode()){
+      const text=n.nodeType===3,owner=text?n.parentElement:n;
+      // An unlabelled spinner SVG/canvas is not evidence of an answer.
+      // Text inside real diagrams and explicit file/image nodes still qualify.
+      if(text?!/\S/.test(n.data):!n.matches("img[src],video[src],a[download],[data-file-name]"))continue;
+      if(!owner.closest(ignoredBody)&&painted(owner))return {node:owner,text:text?n.data:""};
+    }
+    return null;
+  }
+  function domFiles(el){return files(fileNodes(el).map(n=>({name:fileName(n),id:fileID(n),type:n.tagName==="IMG"?"image":"file"})));}
+  function domRows({light=false}={}){
+    if(light){
+      sample();const rows=[];
+      for(const [id,el] of live){
+        if(!el)continue;
+        const role=source.roleOf(el),text=role==="user"?firstContent(el)?.text:"";
+        rows.push({id,role,title:tidy(text?.slice(0,1024)).slice(0,220)});
+      }
+      return rows;
+    }
     return mounted().map(el=>({id:idOf(el),role:source.roleOf(el),body:textMap(surface(el)).text,
       headings:titles(el).map(h=>({text:tidy(h.textContent),level:headingLevel(h)})),
-      files:files(fileNodes(el).map(n=>({name:fileName(n),id:fileID(n),type:n.tagName==="IMG"?"image":"file"})))}));
+      files:domFiles(el)}));
   }
   function headings(body){
     const result=[];let fence=null;
@@ -52,25 +84,43 @@ globalThis.ReaderPageIndex = (() => {
         const text=tidy(value.replace(/\[([^\]]+)\]\([^)]*\)/g,"$1")
           .replace(/(`+)(.+?)\1|(\*{1,3})(\S(?:.*?\S)?)\3|(?<![\p{L}\p{N}_])(_{1,3})(\S(?:.*?\S)?)\5(?![\p{L}\p{N}_])/gu,
             (_all,_ticks,code,_stars,emphasis,_underscores,word)=>code??emphasis??word));
-        if(chapterText(text))result.push({level:h?h[1].length:setext[1][0]==="="?1:2,text});
+        if(chapterText(text))result.push({level:h?h[1].length:setext[1][0]==="="?1:2,text:copy(text)});
         if(setext)i++;
       }
     }return result;
   }
-  function fromBranch(data){
-    return data.messages.map(m=>{
-      const body=ReaderVisible(m,FastTextExporter).body||"";
+  function corroborate(m,body){
       // An explicit source read can corroborate a changed remount. Only exact
       // visible text clears uncertainty; Markdown/render differences wait.
       const el=live.get(m.id);
-      if(el?.isConnected&&uncertain.has(el)&&!source.pending(el)&&source.roleOf(el)===m.role){
+      if(el?.isConnected&&uncertain.has(el)&&firstContent(el)&&source.roleOf(el)===m.role){
         const text=tidy(textMap(surface(el)).text);
-        if(text&&text===tidy(body)){contents.set(m.id,fingerprint(text));uncertain.delete(el);}
+        let matches=text&&text===tidy(body);
+        if(!matches&&text&&body.includes("#")){
+          const sourceTitles=headings(body),nodes=titles(el);
+          if(sourceTitles.length&&sourceTitles.length===nodes.length&&sourceTitles.every((h,i)=>h.text===tidy(nodes[i].textContent)&&h.level===headingLevel(nodes[i]))){
+            // Strip only corroborated ATX markers, never arbitrary punctuation
+            // from code or prose. The entire projected body must still agree.
+            let i=0;
+            const rendered=body.replace(/^ {0,3}(#{1,6})[ \t]+(.+?)\s*$/gm,(line,marks,label)=>{
+              const h=sourceTitles[i],title=tidy(label.replace(/[ \t]+#+[ \t]*$/,""));
+              if(h?.text!==title||h.level!==marks.length)return line;
+              i++;return title;
+            });
+            matches=i===sourceTitles.length&&tidy(rendered)===text;
+          }
+        }
+        if(matches){contents.set(m.id,fingerprint(text));uncertain.delete(el);}
       }
-      return {id:m.id,role:m.role,body,headings:headings(body),files:files([
+  }
+  function assetFiles(m){return files([
         ...(m.images||[]).map(a=>({...a,type:"image"})),...(m.attachments||[]).map(a=>({...a,type:"file"})),
         ...(m.tables||[]).map(a=>({...a,type:"table"}))
-      ].map(a=>({name:a.name||a.alt||a.title||a.fileId,id:a.fileId||"",type:a.type})).filter(a=>a.name))};
+      ].map(a=>({name:a.name||a.alt||a.title||a.fileId,id:a.fileId||"",type:a.type})).filter(a=>a.name));}
+  function fromBranch(data){
+    return data.messages.map(m=>{
+      const body=ReaderVisible(m,FastTextExporter).body||"";corroborate(m,body);
+      return {id:m.id,role:m.role,body,headings:headings(body),files:assetFiles(m)};
     });
   }
   // Small slices must own their bytes: a sliced preview can otherwise keep a
@@ -118,6 +168,15 @@ globalThis.ReaderPageIndex = (() => {
       if(headings===row.headings)return row;changed=true;return metadata({...row,headings});
     });return changed?merged:rows;
   }
+  function localHeadings(row,api){
+    sample();const el=live.get(row.id);
+    if(!el||source.roleOf(el)!==row.role||uncertain.has(el)||!firstContent(el))return api;
+    return mergeHeadings(api,titles(el).map(n=>({level:headingLevel(n),text:tidy(n.textContent)})));
+  }
+  function mountedFiles(id){
+    sample();const el=live.get(id);
+    return el&&!uncertain.has(el)&&!source.pending(el)?domFiles(el):[];
+  }
   function tree(rows){
     const turns=[];
     for(const row of rows){
@@ -128,9 +187,9 @@ globalThis.ReaderPageIndex = (() => {
     return turns;
   }
   function domBody(id){
-    const matches=mounted().filter(n=>idOf(n)===id);
-    if(matches.length!==1||source.pending(matches[0])||uncertain.has(matches[0]))throw Error("The message is not uniquely mounted and ready.");
-    return textMap(surface(matches[0])).text;
+    sample();const el=live.get(id);
+    if(!el||!firstContent(el)||uncertain.has(el))throw Error("The message is not uniquely mounted and ready.");
+    return textMap(surface(el)).text;
   }
   // Body bytes stay in the source provider. The navigation model retains only
   // lightweight metadata, a sparse cursor per 64 hits, and one page of snippets.
@@ -174,32 +233,72 @@ globalThis.ReaderPageIndex = (() => {
     let hash=2166136261;for(let i=0;i<text.length;i++)hash=Math.imul(hash^text.charCodeAt(i),16777619);
     return `${text.length}:${hash}`;
   }
-  function sample(messages=mounted()){
-    if(location.pathname!==route){contents.clear();live.clear();marker=undefined;unmatched="";revision++;route=location.pathname;}
-    const current=source.explicitLeaf();if(current&&marker&&current!==marker)revision++;if(current)marker=current;
-    const active=generating();if(active&&!wasGenerating)revision++;wasGenerating=active;
-    const unknown=source.outsideBranch();if(unknown&&unknown!==unmatched)revision++;unmatched=unknown;
-    const next=new Map(),duplicates=new Set();
-    for(const el of messages){const id=idOf(el);if(next.has(id))duplicates.add(id);next.set(id,el);}
-    for(const [id,el] of next){
-      // Explicit render-in-progress is not evidence of a source edit. Retain
-      // the last settled signature and compare again when hydration finishes.
-      if(duplicates.has(id)||source.pending(el)){
-        if(contents.has(id)&&live.get(id)!==el)uncertain.add(el);
-        continue;
+  let observer,inventoryDirty=true,identityVersion=-1,inventory=[],scans=0,bodyChecks=0;
+  let sourceCost,lastJump,jumpNumber=0,outcomes={};
+  let hydrating=new WeakSet(),overflow=false;
+  const dirty=new Set(),renderStamp=new WeakMap();
+  const evidenceSelector=source.identitySelector+","+source.roleSelector+",[data-current-node-id],[data-testid=stop-button],[data-talvt-turn-state],button[aria-label]";
+  function mutations(records){
+    for(const r of records){
+      const node=r.target.nodeType===1?r.target:r.target.parentElement,owner=node?.closest(source.identitySelector);
+      const elements=[...r.addedNodes,...r.removedNodes].filter(n=>n.nodeType===1);
+      if(elements.some(n=>n.matches(evidenceSelector)||n.querySelector(evidenceSelector)))inventoryDirty=true;
+      if(r.type==="attributes"){
+        if(!owner&&node?.querySelector(evidenceSelector)||node===owner||node.matches(source.roleSelector)||node.matches(evidenceSelector)||
+            /^data-(message|conversation|chatgpt|current-node|talvt)|^aria-label$/.test(r.attributeName))inventoryDirty=true;
+        if(owner)hydrating.add(owner);
       }
-      const text=tidy(textMap(surface(el)).text),prior=contents.get(id);
-      if(!text){if(prior)uncertain.add(el);continue;}
+      for(let el=owner;el;el=el.parentElement?.closest(source.identitySelector)){
+        dirty.add(el);renderStamp.set(el,(renderStamp.get(el)||0)+1);
+        if(elements.length)hydrating.add(el);
+      }
+      if(dirty.size>256){dirty.clear();overflow=true;}
+    }
+  }
+  function sample(force=false){
+    if(!observer&&typeof MutationObserver==="function"){
+      observer=new MutationObserver(mutations);
+      observer.observe(document.documentElement,{childList:true,subtree:true,characterData:true,attributes:true,
+        attributeFilter:["class","style","hidden","inert","open","aria-hidden","aria-busy","aria-label","data-message-id",
+          "data-message-author-role","data-response-body","data-heading-level","aria-level","role","data-conversation-role",
+          "data-chatgpt-search-message-ids","data-current-node-id","data-testid","data-talvt-turn-state"]});
+    }
+    if(observer)mutations(observer.takeRecords());
+    if(location.pathname!==route){contents.clear();live.clear();dirty.clear();hydrating=new WeakSet();inventoryDirty=true;
+      sourceCost=lastJump=null;outcomes={};
+      marker=undefined;unmatched="";revision++;route=location.pathname;}
+    if(overflow){force=true;overflow=false;}
+    const refresh=force||inventoryDirty||!observer||source.identityVersion()!==identityVersion;
+    if(!refresh&&!dirty.size)return revision;
+    let next=live;
+    if(refresh){
+      inventory=mounted();scans++;next=new Map();
+      for(const el of inventory){const id=idOf(el);next.set(id,next.has(id)?null:el);}
+      const current=source.explicitLeaf();if(current&&marker&&current!==marker)revision++;if(current)marker=current;
+      const active=generating();if(active&&!wasGenerating)revision++;wasGenerating=active;
+      const unknown=source.outsideBranch();if(unknown&&unknown!==unmatched)revision++;unmatched=unknown;
+      identityVersion=source.identityVersion();inventoryDirty=false;
+    }
+    const examine=(id,el)=>{
+      if(!el)return;
+      const owner=el.closest(source.identitySelector);
+      if(live.get(id)===el&&!dirty.has(owner)&&!force)return;
+      const prior=contents.get(id);
+      if(source.pending(el)){if(prior)uncertain.add(el);return;}
+      const text=tidy(textMap(surface(el)).text);bodyChecks++;
+      if(!text){if(prior)uncertain.add(el);return;}
       const signature=fingerprint(text);
       if(prior&&prior!==signature){
-        // React can replace a settled message with a partly hydrated copy.
-        // The identity alone cannot prove either a branch edit or a landing.
-        if(live.get(id)!==el||uncertain.has(el)){uncertain.add(el);continue;}
+        if(live.get(id)!==el||uncertain.has(el)||hydrating.has(owner)){uncertain.add(el);return;}
         revision++;
       }
       contents.set(id,signature);uncertain.delete(el);
-    }
-    live=next;
+    };
+    if(refresh){for(const [id,el] of next)examine(id,el);}
+    else for(const owner of dirty){for(const id of source.candidates(owner)){
+      const key=next.has(id)?id:idOf(owner);if(key)examine(key,next.get(key));
+    }}
+    live=next;dirty.clear();hydrating=new WeakSet();
     while(contents.size>6000)contents.delete(contents.keys().next().value);
     return revision;
   }
@@ -232,7 +331,7 @@ globalThis.ReaderPageIndex = (() => {
     const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT),segments=[],parts=[];let at=0,block;
     for(let n=walker.nextNode();n;n=walker.nextNode()){
       const el=n.parentElement;
-      if(!el||el.closest('script,style,button,textarea,[hidden],[aria-hidden="true"],.katex-mathml')||
+      if(!el||el.closest(ignoredBody)||
         !source.visible(el)||!el.getClientRects().length)continue;
       const next=el.closest("p,li,pre,td,th,h1,h2,h3,h4,h5,h6,blockquote,div")||root;
       if(block&&block!==next){parts.push("\n");at++;}block=next;
@@ -263,19 +362,55 @@ globalThis.ReaderPageIndex = (() => {
     const r=document.createRange();r.setStart(first.node,hit.start-first.start);r.setEnd(last.node,hit.end-last.start);
     return {range:r,node:first.node.parentElement};
   }
-  function destination(msg,row,target){
+  const chapterLayouts=new WeakMap();
+  function chapterLayout(msg,expected,fresh){
+    const stamp=renderStamp.get(msg.closest(source.identitySelector)),old=chapterLayouts.get(expected);
+    if(!fresh&&old?.msg===msg&&old.stamp===stamp)return old;
+    const key=h=>JSON.stringify([h.level,h.text]),groups=list=>{
+      const map=new Map();list.forEach((h,i)=>{const k=key(h);if(!map.has(k))map.set(k,[]);map.get(k).push(i);});return map;};
+    const nodes=titles(msg),actual=nodes.map(n=>({text:tidy(n.textContent),level:headingLevel(n)}));
+    const a=groups(expected),b=groups(actual);
+    function match(i){
+      const k=key(expected[i]),origins=a.get(k),rendered=b.get(k);
+      if(!rendered||rendered.length!==origins.length)return null;
+      const at=rendered[origins.indexOf(i)];
+      if(origins.length>1){
+        // Shared, unique landmarks must stay on the same side of this
+        // occurrence. Equal counts alone do not disambiguate reordered groups.
+        for(const [label,list] of a){const other=b.get(label);
+          if(list.length===1&&other?.length===1&&((list[0]<i)!==(other[0]<at)))return null;}
+      }
+      return nodes[at];
+    }
+    const layout={msg,stamp,nodes,expected:a,actual:b,key,match};chapterLayouts.set(expected,layout);return layout;
+  }
+  function destination(msg,row,target,{fuse=false}={}){
     if(target.query){
       const match=textTarget(msg,row,target);
       return match?{...match,kind:"text",rect:()=>[...match.range.getClientRects()].find(r=>r.width&&r.height)||match.range.getBoundingClientRect()}:null;
     }
     let node=msg,kind="message";
     if(target.heading!==undefined){
+      if(fuse){
+        const requested=row.headings[target.heading];
+        if(!requested)return null;
+        // Hydration can add DOM-only chapters or refine a unique source title's
+        // semantic level. Remap by identity, not the old numeric position.
+        const merged=mergeHeadings(row.headings,titles(msg).map(n=>({text:tidy(n.textContent),level:headingLevel(n)})));
+        if(merged!==row.headings){
+          const before=row.headings.filter(h=>h.text===requested.text),after=merged.filter(h=>h.text===requested.text);
+          if(before.length!==after.length)return null;
+          const occurrence=row.headings.slice(0,target.heading).filter(h=>h.text===requested.text).length;
+          const match=after[occurrence];
+          if(!match||before.length>1&&match.level!==requested.level)return null;
+          target={...target,heading:merged.indexOf(match)};row={...row,headings:merged};
+        }
+      }
       const h=row.headings[target.heading];if(!h)return null;
-      const same=row.headings.slice(0,target.heading).filter(a=>a.text===h.text&&a.level===h.level).length;
-      const candidates=titles(msg).filter(el=>tidy(el.textContent)===h.text&&headingLevel(el)===h.level);
+      const layout=chapterLayout(msg,row.headings,true),candidates=layout.actual.get(layout.key(h))||[];
       // If only one of two equal headings is currently mounted, its ordinal
       // is unknown. Wait for proof rather than choosing an unrelated heading.
-      if(candidates.length!==row.headings.filter(a=>a.text===h.text&&a.level===h.level).length){
+      if(candidates.length!==layout.expected.get(layout.key(h)).length){
         // Hydrated widgets can render a semantic API heading as an ordinary standalone
         // block. Require a unique source heading AND text occurrence, context on both
         // sides in this same message, and a whole visible block (not a mention).
@@ -290,7 +425,7 @@ globalThis.ReaderPageIndex = (() => {
         const rendered=matches(textMap(surface(msg)).text,h.text);rendered.next();if(!rendered.next().done)return null;
         return {...match,kind:"heading-text",rect:()=>[...match.range.getClientRects()].find(r=>r.width&&r.height)||match.range.getBoundingClientRect()};
       }
-      node=candidates[same];
+      node=layout.match(target.heading);
       kind="heading";if(!node)return null;
     }
     if(target.file!==undefined){
@@ -380,18 +515,29 @@ globalThis.ReaderPageIndex = (() => {
     const x=a.dest.range,y=b.dest.range;
     return !x&&!y||!!x&&!!y&&["startContainer","endContainer","startOffset","endOffset"].every(k=>x[k]===y[k]);
   }
-  async function jump(rows,target,signal,report=()=>{},targetBody){
+  async function jump(rows,target,signal,report=()=>{},targetBody,options={}){
     clearFocus();
     signal?.throwIfAborted();
-    const path=location.pathname,version=sample(),order=new Map(rows.map((r,i)=>[r.id,i])),index=order.get(target.id);
-    const fail=reason=>({ok:false,reason});
+    const started=performance.now(),initialScans=scans,initialChecks=bodyChecks;
+    const path=location.pathname,version=options.version??sample(),order=options.order||new Map(rows.map((r,i)=>[r.id,i])),index=order.get(target.id);
+    const run=++jumpNumber;let firstShell,firstReady;
+    function record(outcome){
+      const end=performance.now(),metrics={elapsedMs:end-started,historyMs:(firstShell??end)-started,
+        bodyWaitMs:firstShell===undefined?0:(firstReady??end)-firstShell,landingMs:firstReady===undefined?0:end-firstReady,
+        inventoryScans:scans-initialScans,bodyChecks:bodyChecks-initialChecks};
+      if(path===location.pathname){outcomes[outcome]=(outcomes[outcome]||0)+1;if(run===jumpNumber)lastJump={outcome,...metrics};}
+      return metrics;
+    }
+    const fail=reason=>({ok:false,reason,metrics:record(reason)});
     if(index===undefined)return fail("missing");
     if(order.size!==rows.length)return fail("target");
-    const row=targetBody===undefined?rows[index]:{...rows[index],body:targetBody},now=performance.now(),hardEnd=now+45000;
+    const row={...rows[index],...options.detail,...(targetBody===undefined?{}:{body:targetBody})},now=performance.now(),hardEnd=now+45000;
+    if(target.heading!==undefined&&!row.headings?.[target.heading]||target.file!==undefined&&!row.files?.[target.file])return fail("target");
     let until=now+12000,best=Infinity,advances=0,lastProbe;
     let root,shape="",probes=0,low=0,high=Infinity,stable=0,previous,lastReason="unmounted",interrupted=false;
-    let wake,expired=false;
-    const notify=()=>wake?.();
+    let wake,expired=false,finished=false;
+    const proofCtl=new AbortController();
+    const notify=()=>{if(signal?.aborted)proofCtl.abort(signal.reason);wake?.();};
     const input=e=>{
       // Native scroll events also result from our own writes; only trusted
       // user intent cancels. The initiating button event has already run.
@@ -401,7 +547,7 @@ globalThis.ReaderPageIndex = (() => {
     };
     const events=["wheel","touchstart","pointerdown","keydown"];
     const check=()=>{signal?.throwIfAborted();if(interrupted)throw new DOMException("Navigation cancelled","AbortError");};
-    const changed=els=>path!==location.pathname||sample(els)!==version||!!unmatched||wasGenerating;
+    const changed=force=>path!==location.pathname||sample(force)!==version||!!unmatched||wasGenerating;
     const pause=()=>new Promise(resolve=>{
       let frame;
       const done=()=>{if(wake!==done)return;wake=undefined;cancelAnimationFrame(frame);resolve();};
@@ -411,38 +557,101 @@ globalThis.ReaderPageIndex = (() => {
     signal?.addEventListener("abort",notify,{once:true});
     const expire=()=>{expired=true;notify();};
     let deadline=setTimeout(expire,12000);
+    function advance(){
+      until=Math.min(hardEnd,performance.now()+12000);clearTimeout(deadline);
+      deadline=setTimeout(expire,Math.max(0,until-performance.now()));
+    }
+    let cached,stage=0,known=[],knownScan=-1,shells=[],shellScan=-1,checkedShell,proof,readingProof=false;
+    function shellsFor(msg,fresh=false){
+      if(fresh||shellScan!==scans){shells=source.preparationShells(target.id,row.role,row.alias);shellScan=scans;}
+      return shells.filter(el=>!msg||el!==msg&&!el.contains(msg)&&!msg.contains(el));
+    }
+    function resolve(msg,fresh=false){
+      const stamp=renderStamp.get(msg.closest(source.identitySelector)),time=performance.now();
+      if(uncertain.has(msg)){
+        if(typeof row.body==="string"&&(msg!==proof?.msg||stamp!==proof.stamp||fresh)){
+          proof={msg,stamp};corroborate(row,row.body);
+        }else if(row.body===undefined&&options.loadBody&&!readingProof){
+          readingProof=true;
+          options.loadBody(row.id,proofCtl.signal).then(body=>{if(!finished&&!proofCtl.signal.aborted){row.body=body;cached=null;notify();}},()=>{});
+        }
+      }
+      // Missing layout can change without a DOM mutation (e.g. skipped CSS
+      // content). Probe it periodically and resolve afresh at certification.
+      if(!fresh&&cached?.msg===msg&&cached.stamp===stamp&&(time-cached.time<cached.interval||
+          cached.dest&&!["answer-fallback","message-fallback"].includes(cached.dest.kind)&&painted(cached.dest.node))&&
+          (!cached.dest||cached.dest.node.isConnected)&&!uncertain.has(msg))return cached.dest;
+      let dest=null;
+      const content=!uncertain.has(msg)&&firstContent(msg);
+      if(content){
+        if(firstReady===undefined){firstReady=time;advance();}
+        if(target.heading!==undefined||target.file!==undefined||target.query)dest=destination(msg,row,target,{fuse:true});
+        else dest={kind:"message",node:content.node};
+        if(dest&&dest.kind==="message-fallback")dest={kind:dest.kind,node:content.node};
+        if(target.heading!==undefined&&dest&&(!painted(dest.node)||!(dest.rect().height>0)))dest=null;
+        if(!dest&&target.heading!==undefined)dest={kind:"answer-fallback",node:content.node};
+        if(dest&&!dest.rect)dest.rect=()=>dest.node.getBoundingClientRect();
+      }
+      const interval=cached?.msg===msg&&cached.stamp===stamp?Math.min(1600,cached.interval*2):200;
+      cached={msg,stamp,time,dest,interval};return dest;
+    }
+    function certify(current){
+      check();if(changed(true)||live.get(target.id)!==current.msg||source.roleOf(current.msg)!==row.role||shellsFor(current.msg,true).length)return null;
+      const dest=resolve(current.msg,true);
+      if(!dest||!painted(dest.node)||!current.msg.contains(dest.node))return null;
+      const root=scroller(dest.node),view=range(root),r=dest.rect();
+      if(!inside(r,view)||!sameLanding(current,{msg:current.msg,root,dest,r,view,offset:root.scrollTop}))return null;
+      check();try{focusLanding(current.msg,r,view,signal);}catch{clearFocus();}
+      return {ok:true,kind:dest.kind,probes,metrics:record(dest.kind)};
+    }
     try{
       while(!expired&&performance.now()<until){
-        check();const els=mounted();if(changed(els))return fail("changed");
-        const found=els.filter(el=>idOf(el)===target.id),msg=found.length===1?found[0]:null;
-        const known=els.filter(el=>rows[order.get(idOf(el))]?.role===source.roleOf(el));
-        const anchor=msg||known.find(el=>inside(el.getBoundingClientRect(),range(scroller(el))))||known[0];
+        check();if(changed())return fail("changed");
+        const found=live.has(target.id),msg=live.get(target.id);
+        if(found&&(!msg||source.roleOf(msg)!==row.role)){previous=null;stable=0;lastReason="target";await pause();continue;}
+        const other=shellsFor(msg);
+        if(other.length>1||msg&&other.length){previous=null;stable=0;lastReason="target";await pause();continue;}
+        const shell=other[0];
+        if(shell&&!msg&&source.visible(shell)&&firstContent(shell)&&checkedShell!==shell){
+          // CSS may resume painting without an attribute/child-list mutation.
+          // Only rebuild the identity inventory on this observed transition.
+          checkedShell=shell;if(changed(true))return fail("changed");continue;
+        }
+        if((msg||shell)&&firstShell===undefined){firstShell=performance.now();advance();}
+        if(!found&&!shell&&knownScan!==scans){known=inventory.filter(el=>rows[order.get(idOf(el))]?.role===source.roleOf(el));knownScan=scans;}
+        const dest=msg&&resolve(msg);
+        const views=new Map(),viewOf=root=>{if(!views.has(root))views.set(root,range(root));return views.get(root);};
+        const anchor=dest?.node||msg||shell||known.find(el=>inside(el.getBoundingClientRect(),viewOf(scroller(el))))||known[0];
         const nextRoot=anchor&&scroller(anchor);
         if(!nextRoot?.isConnected){lastReason="unmounted";previous=null;stable=0;await pause();continue;}
-        const view=range(nextRoot),bounds=axis(nextRoot),nextShape=JSON.stringify([bounds.start,nextRoot.scrollHeight,nextRoot.clientHeight,view]);
+        const view=viewOf(nextRoot),bounds=axis(nextRoot),nextShape=JSON.stringify([bounds.start,nextRoot.scrollHeight,nextRoot.clientHeight,view]);
         if(nextRoot!==root||nextShape!==shape){root=nextRoot;shape=nextShape;low=0;high=Infinity;previous=null;stable=0;lastProbe=null;}
         const reveal=outerAdjustment(root);
         if(reveal){check();reveal.root.scrollTo({top:reveal.top,behavior:"instant"});previous=null;stable=0;await pause();continue;}
-        if(found.length){
-          const ready=msg&&source.roleOf(msg)===row.role&&!source.pending(msg)&&!uncertain.has(msg);
-          const dest=ready&&destination(msg,row,target);
-          lastReason=dest?"hidden":"target";
-          if(!dest||!msg.contains(dest.node)||!source.visible(dest.node)){previous=null;stable=0;await pause();continue;}
-          const r=dest.rect();
-          if(!(r?.width>0&&r.height>0)){previous=null;stable=0;await pause();continue;}
+        if(found||shell){
+          const r=dest&&msg.contains(dest.node)&&painted(dest.node)&&dest.rect();
+          if(!(r?.width>0&&r.height>0)){
+            lastReason="body";previous=null;stable=0;
+            const box=(msg||shell).getBoundingClientRect();
+            if(box.width>0&&Number.isFinite(box.top)){
+              const top=aligned(root,box.top,{...view,top:readingLine(view,box)},bounds);
+              if(Math.abs(top-root.scrollTop)>1){check();root.scrollTo({top,behavior:"instant"});}
+            }
+            await pause();continue;
+          }
+          lastReason="hidden";
+          if(dest.kind!=="answer-fallback"&&stage===0){stage=1;advance();}
           const next=aligned(root,r.top,{...view,top:readingLine(view,r)},bounds);
           if(Math.abs(next-root.scrollTop)>1){
             check();root.scrollTo({top:next,behavior:"instant"});stable=0;previous=null;
           }else{
-            // Every observation follows a fresh adapter lookup, including
-            // after the final awaited frames. Never certify a retained node.
+            // Dirty identity evidence invalidates cached nodes; the success
+            // boundary also does a full lookup. Never certify geometry alone.
             const current={msg,root,dest,r,view,offset:root.scrollTop};
             stable=inside(r,view)&&sameLanding(previous,current)?stable+1:0;
             previous=current;
-            if(stable>=4){
-              check();
-              try{focusLanding(msg,r,view,signal);}catch{clearFocus();} // Decoration cannot certify or invalidate a location.
-              return {ok:true,kind:dest.kind,probes};
+            if(stable>=4&&dest.kind!=="answer-fallback"){
+              const result=certify(current);if(result)return result;stable=0;previous=null;cached=null;
             }
           }
         }else{
@@ -456,8 +665,7 @@ globalThis.ReaderPageIndex = (() => {
           let distance=Infinity;for(const a of anchors)if(inside(a.r,view))distance=Math.min(distance,Math.abs(a.index-index));
           if(!Number.isFinite(distance)){await pause();continue;}
           if(distance<best){
-            if(Number.isFinite(best)){advances++;until=Math.min(hardEnd,performance.now()+12000);
-              clearTimeout(deadline);deadline=setTimeout(expire,Math.max(0,until-performance.now()));}
+            if(Number.isFinite(best)){advances++;advance();}
             best=distance;
           }
           const max=bounds.extent,position=root.scrollTop-bounds.start,first=anchors[0],last=anchors.at(-1);
@@ -477,34 +685,40 @@ globalThis.ReaderPageIndex = (() => {
         }
         await pause();
       }
-      check();if(changed(mounted()))return fail("changed");return fail(lastReason);
-    }finally{
+      check();if(changed())return fail("changed");
+      if(stable>=4&&previous?.dest.kind==="answer-fallback"){const result=certify(previous);if(result)return result;}
+      return fail(lastReason);
+    }catch(e){record(e.name==="AbortError"?"cancelled":"interrupted");throw e;}finally{
+      finished=true;proofCtl.abort();
       clearTimeout(deadline);signal?.removeEventListener("abort",notify);
       for(const event of events)document.removeEventListener(event,input,true);
     }
   }
   function visible(){
-    for(const el of mounted()){
+    sample();for(const [id,el] of live){
+      if(!el||uncertain.has(el))continue;
       const r=el.getBoundingClientRect(),root=scroller(el);if(!root)continue;
       const view=range(root);
-      if(inside(r,view))return idOf(el);
+      if(inside(r,view)&&firstContent(el)&&inside(surface(el).getBoundingClientRect(),view))return id;
     }
     return null;
   }
-  function currentSection(row){
-    if(!row||visible()!==row.id)return null;
-    const matches=mounted().filter(el=>idOf(el)===row.id);
-    if(matches.length!==1||source.roleOf(matches[0])!==row.role)return null;
-    const msg=matches[0],target={id:row.id};
-    if(source.pending(msg)||uncertain.has(msg))return target;
-    const view=range(scroller(msg)),heading=titles(msg).filter(el=>{
+  function currentSection(row,visibleId){
+    if(!row)return null;sample();
+    const msg=live.get(row.id),target={id:row.id};
+    if(!msg||source.roleOf(msg)!==row.role)return null;
+    if(uncertain.has(msg))return inside(msg.getBoundingClientRect(),range(scroller(msg)))?target:null;
+    if((visibleId??visible())!==row.id)return null;
+    if(source.pending(msg))return target;
+    if(!row.headings?.length)return target;
+    const layout=chapterLayout(msg,row.headings,false),view=range(scroller(msg)),heading=layout.nodes.filter(el=>{
       const r=el.getBoundingClientRect();return r.width>0&&r.height>0&&r.top<=view.top+1;
     }).at(-1);
     if(!heading)return target;
     const text=tidy(heading.textContent),level=headingLevel(heading);
     for(let index=0;index<(row.headings||[]).length;index++){
       const h=row.headings[index];
-      if(h.text===text&&h.level===level&&destination(msg,row,{heading:index})?.node===heading)return {...target,heading:index};
+      if(h.text===text&&h.level===level&&layout.match(index)===heading)return {...target,heading:index};
     }
     return target;
   }
@@ -513,7 +727,9 @@ globalThis.ReaderPageIndex = (() => {
     const input=source.composer();
     const composer=input?.closest("form")||input,rect=composer?.getBoundingClientRect();
     const edge=rect?.height&&rect.top>top+44?Math.min(rect.top-12,top+height-8):top+height-8;
-    const reading=mounted().find(n=>n.getBoundingClientRect().bottom>top)?.getBoundingClientRect();
+    // Only the column width is used for panel placement. No identity or body
+    // enumeration is needed when the composer or viewport resizes.
+    const reading=(inventory.find(n=>n.isConnected)||document.querySelector(source.identitySelector))?.getBoundingClientRect();
     return {top,height,width,edge,composer,compact:width<760||!!reading&&reading.right>width-352,bottom:Math.max(76,innerHeight-edge)};
   }
   const layoutListeners=new Set();let layoutObserver,composer,scheduled=false;
@@ -531,5 +747,10 @@ globalThis.ReaderPageIndex = (() => {
     }
     listener(layout());update();return ()=>layoutListeners.delete(listener);
   }
-  return {mounted,idOf,domRows,domBody,fromBranch,metadata,mergeMounted,sections,tree,search,leaf,sample,revision:()=>revision,visible,currentSection,jump,clearFocus,matches,textTarget,destination,layout,observeLayout,generating};
+  function renderState(id){sample();const node=live.get(id);
+    return {node,version:node?renderStamp.get(node.closest(source.identitySelector))||0:0};}
+  // Available in the extension's isolated DevTools context for manual timing.
+  // Counters stay in memory and contain no targets, text, URLs or credentials.
+  return {mounted,idOf,domRows,domBody,mountedFiles,fromBranch,corroborate,headings,assetFiles,localHeadings,renderState,metadata,mergeMounted,sections,tree,search,leaf,sample,revision:()=>revision,visible,currentSection,jump,clearFocus,matches,textTarget,destination,layout,observeLayout,generating,
+    recordSource:cost=>{sourceCost=cost;},metrics:()=>({source:{...sourceCost},outcomes:{...outcomes},last:lastJump?{...lastJump}:null})};
 })();

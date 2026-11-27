@@ -5,9 +5,9 @@ globalThis.ChatExportSourceDOM = (() => {
   const legacyRoleSelector = '[data-message-author-role="user"],[data-message-author-role="assistant"]';
   const roleSelector = legacyRoleSelector + ',[data-conversation-role="user"],[data-conversation-role="assistant"]';
   const valid = value => typeof value === "string" && /^[\w-]{1,128}$/.test(value);
-  let route = "", branch = null, known = new Map();
+  let route = "", branch = null, known = new Map(), identityVersion=0;
   function resetRoute() {
-    if (route !== location.pathname) { route = location.pathname; branch = null; known.clear(); }
+    if (route !== location.pathname) { route = location.pathname; branch = null; known.clear(); identityVersion++; }
   }
   function visible(el) {
     if (!el?.isConnected || el.closest('[hidden],[aria-hidden="true"],[inert]')) return false;
@@ -89,7 +89,7 @@ globalThis.ChatExportSourceDOM = (() => {
     const record = {id:row.id, role:row.role};
     for (const id of new Set([row.id,row.sourcePath?.at(-1)].filter(valid))) {
       const owners = records(id);
-      if (!owners.some(owner => owner.id === row.id && owner.role === row.role)) known.set(id,[...owners,record]);
+      if (!owners.some(owner => owner.id === row.id && owner.role === row.role)){known.set(id,[...owners,record]);identityVersion++;}
     }
   }
   function identities() {
@@ -99,16 +99,21 @@ globalThis.ChatExportSourceDOM = (() => {
       el.getAttribute("data-message-id"), ...(el.getAttribute("data-chatgpt-search-message-ids") || "").trim().split(/\s+/)
     ]).filter(valid))];
   }
+  function conflictingRoles(){
+    return messageNodes().some(el=>{const role=rawRole(el);if(!role)return false;
+      const owners=candidates(el).flatMap(records);
+      return role==="conflict"||owners.length>0&&!owners.some(owner=>owner.role===role);});
+  }
   function verify(data) {
     resetRoute();
     const accepted = data.identities || data.ids;
     if (!accepted?.has || identities().some(id => !accepted.has(id))) return false;
-    if (messageNodes().some(el => rawRole(el)==="conflict" || rawRole(el) && candidates(el).some(id => known.has(id)) &&
-        !candidates(el).flatMap(records).some(owner => owner.role === rawRole(el)))) return false;
+    if(conflictingRoles())return false;
+    if(branch!==accepted)identityVersion++;
     branch = accepted; return true;
   }
   function outsideBranch() {
-    resetRoute(); return branch ? identities().filter(id => !branch.has(id)).sort().join(" ") : "";
+    resetRoute(); return branch ? identities().filter(id => !branch.has(id)).sort().join(" ") || (conflictingRoles()?"!":"") : "";
   }
   const explicitLeaf = () => all("[data-current-node-id]").map(el => el.getAttribute("data-current-node-id")).find(valid);
   const lastMessage = () => ownIDs(all(identitySelector).at(-1)).at(-1);
@@ -126,6 +131,32 @@ globalThis.ChatExportSourceDOM = (() => {
     return !!el.closest('[aria-busy="true"]') ||
       [...surface(el).querySelectorAll('[aria-busy="true"]')].some(n => !n.closest("button") && visible(n));
   }
+  function bindNavigation(data,rows){
+    resetRoute();const previous=known;known=new Map();
+    try{
+      for(const row of rows)remember({id:row.id,role:row.role,sourcePath:[row.alias]});
+      if(verify(data))return true;
+    }catch(e){known=previous;identityVersion++;throw e;}
+    known=previous;identityVersion++;return false;
+  }
+  // Preparation only. Identity-bearing boxes may survive a skipped subtree,
+  // including a hidden inner role wrapper which mounted() correctly excludes.
+  function preparationShells(id,role,alias){
+    if(!valid(id))return [];
+    const ids=[...new Set([id,alias].filter(valid))];
+    const selector=ids.flatMap(key=>[`[data-message-id="${key}"]`,`[data-chatgpt-search-message-ids~="${key}"]`]).join(",");
+    return [...document.querySelectorAll(selector)].filter(el=>{
+      if(!visible(el.parentElement)||el.closest('[inert],[hidden],[aria-hidden=true]')||idOf(el)!==id)return false;
+      const style=getComputedStyle(el);
+      if(style.display==="none"||style.opacity==="0"||["collapse","hidden"].includes(style.visibility))return false;
+      // A hidden explicit role may contradict the source without contributing
+      // to roleOf(). It cannot supply preparation authority in that case.
+      const labels=[el,...el.querySelectorAll("[data-message-author-role],[data-conversation-role]")];
+      if(labels.some(n=>n.closest(identitySelector)===el&&["data-message-author-role","data-conversation-role"]
+        .some(attr=>n.hasAttribute(attr)&&n.getAttribute(attr)!==role)))return false;
+      return roleOf(el)===role;
+    });
+  }
   return {identitySelector, roleSelector, visible, all, candidates, idOf, roleOf, messageNodes,
-    mounted, remember, identities, verify, outsideBranch, explicitLeaf, lastMessage, branchHint, generating, composer, surface, pending};
+    mounted, remember, identities, verify, bindNavigation,outsideBranch, explicitLeaf, lastMessage, branchHint, generating, composer, surface, pending,preparationShells,identityVersion:()=>identityVersion};
 })();

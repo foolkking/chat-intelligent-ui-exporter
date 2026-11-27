@@ -148,6 +148,54 @@
     const outputs = (message.metadata?.aggregate_result?.messages || []).filter(m => m?.message_type === 'image' && fileIdOf(m.image_url)).map((m, i) => ({fileId:fileIdOf(m.image_url), width:m.width, height:m.height, alt:plots?.[i]?.title ? t('md.plotNamed', plots[i].title) : t('md.plot')}));
     return [...parts, ...outputs].map(i => ({...i, alt:i.alt.replace(/[[\]\r\n]/g, ' ')}));
   }
+  const tableOutput=v=>v?.type==='table'&&typeof v.file_id==='string';
+  const visibleRole=message=>['user','assistant'].includes(message.author?.role)&&
+    !message.metadata?.is_visually_hidden_from_conversation&&(!message.channel||['final','commentary'].includes(message.channel))&&
+    (!message.recipient||message.recipient==='all');
+  function assetsOf(message){
+    if(message.author?.role==='tool')return {images:toolImages(message),tables:(message.metadata?.ada_visualizations||[])
+      .filter(tableOutput).map(v=>({fileId:v.file_id,title:String(v.title||t('md.tableDefault')).replace(/[[\]\r\n]/g,' ').trim()}))};
+    const images=(message.content?.parts||[]).filter(p=>fileIdOf(p?.asset_pointer)).map(p=>({fileId:fileIdOf(p.asset_pointer),width:p.width,height:p.height}));
+    const attachments=message.author?.role==='user'?(message.metadata?.attachments||[]).filter(a=>typeof a?.id==='string'&&!images.some(i=>i.fileId===a.id))
+      .map(a=>({fileId:a.id,name:String(a.name||a.id).split('/').pop(),mime:a.mime_type,size:a.size})):[];
+    return {images,attachments};
+  }
+  // null skips a proven invisible row. undefined asks the canonical converter to
+  // decide an ambiguous record *after* its branch membership has been verified.
+  function navigationHint(m){
+    if(!m||m.metadata?.is_visually_hidden_from_conversation)return null;
+    const role=m.author?.role,content=m.content||{},parts=content.parts??(typeof content.text==='string'?[content.text]:[]);
+    if(!Array.isArray(parts))return undefined;
+    const image=parts.some(p=>fileIdOf(p?.asset_pointer));
+    if(role==='tool'){
+      const outputs=m.metadata?.aggregate_result?.messages,tables=m.metadata?.ada_visualizations;
+      if(outputs!=null&&!Array.isArray(outputs)||tables!=null&&!Array.isArray(tables))return undefined;
+      const shown=image||outputs?.some(o=>o?.message_type==='image'&&fileIdOf(o.image_url))||tables?.some(tableOutput);
+      return shown&&m.id?{id:m.id,role:'assistant',title:'',hasFiles:true}:null;
+    }
+    if(!visibleRole(m))return null;
+    if(!m.id||['user_editable_context','model_editable_context'].includes(content.content_type))return undefined;
+    if(role==='user'&&m.metadata?.attachments!=null&&!Array.isArray(m.metadata.attachments))return undefined;
+    const dil=m.metadata?.model_dil_v2,refs=m.metadata?.content_references;
+    if(!dil&&refs?.length)return undefined;
+    const fallback=dil?.fallbackMarkdown;
+    const staticText=content.content_type!=='code'&&typeof fallback==='string'&&/\S/.test(fallback);
+    if(!staticText&&parts.some(p=>typeof p!=='string'&&typeof p?.text!=='string'&&!fileIdOf(p?.asset_pointer)))return undefined;
+    const attached=role==='user'&&Array.isArray(m.metadata?.attachments)&&m.metadata.attachments.some(a=>typeof a?.id==='string');
+    let title='',hasText=staticText;
+    if(!staticText||role==='user'){
+      const values=staticText?[fallback]:parts;
+      for(const part of values){
+        const value=typeof part==='string'?part:part?.text;
+        if(typeof value!=='string'||!/\S/.test(value))continue;
+        hasText=true;
+        if(role==='user'&&(!dil||staticText))title=(title+' '+value.slice(0,1024).replace(/\s+/g,' ')).trim().slice(0,220);
+        if(role!=='user'||title.length===220)break;
+      }
+    }
+    if(!hasText&&!image&&(!attached||content.content_type&&!['text','multimodal_text','code'].includes(content.content_type)))return undefined;
+    return {id:m.id,role,title:Array.from(title).join(''),hasFiles:!!(image||attached)};
+  }
   function records(messages, {allowEmpty=false}={}) {
     const warnings = [], result = [], seen = new Set();
     for (const message of messages) {
@@ -157,19 +205,15 @@
       // generated images and code-interpreter plots.
       if (role === 'tool') {
         if (message.metadata?.is_visually_hidden_from_conversation || !message.id || seen.has(message.id)) continue;
-        const images = toolImages(message);
+        const {images,tables} = assetsOf(message);
         // A DataFrame shown as a scrollable table is a CSV in the files service.
-        const tables = (message.metadata?.ada_visualizations || []).filter(v => v?.type === 'table' && typeof v.file_id === 'string').map(v => ({fileId:v.file_id, title:String(v.title || t('md.tableDefault')).replace(/[[\]\r\n]/g, ' ').trim()}));
         if (!images.length && !tables.length) continue;
         seen.add(message.id);
         const md = [...tables.map(table => `[${t('md.dataTable', table.title)}](datatable:${table.fileId})`), ...images.map(i => `![${i.alt}](asset:${i.fileId})`)].join('\n\n');
         result.push({id:message.id, role:'assistant', md, needsUI:false, needsTableUI:false, uiReasons:[], needsAssets:false, images, tables, summary:[...tables.map(table => table.title), ...images.map(i => i.alt)].join(t('list.sep')).slice(0,100)});
         continue;
       }
-      if (!['user','assistant'].includes(role) || message.metadata?.is_visually_hidden_from_conversation) continue;
-      // Analysis/tool plumbing is not the displayed answer.
-      if (message.channel && !['final','commentary'].includes(message.channel)) continue;
-      if (message.recipient && message.recipient !== 'all') continue;
+      if (!visibleRole(message)) continue;
       if (!message.id || seen.has(message.id)) error(t('err.messageId'),'SOURCE_FORMAT_INVALID');
       seen.add(message.id);
       const text = textOf(message, warnings);
@@ -182,12 +226,12 @@
         if(!normalized.uiReasons.includes('model-dil'))normalized.uiReasons.push('model-dil');
       }
       // Files-service images are downloaded by id; only other images need the page.
-      const images = (message.content?.parts || []).filter(p=>fileIdOf(p?.asset_pointer)).map(p=>({fileId:fileIdOf(p.asset_pointer),width:p.width,height:p.height}));
+      const {images,attachments} = assetsOf(message);
       const needsAssets = (message.content?.parts || []).some(p=>p && typeof p==='object' && (p.content_type==='image_asset_pointer' || p.asset_pointer) && !fileIdOf(p.asset_pointer)) || /!\[[^\]]*\]\((?!asset:)/.test(normalized.md);
       normalized.needsAssets = needsAssets;normalized.images = images;
       // Files the user attached (a PDF, a CSV…) show as chips above the prompt and are not in
       // the parts; they download by id like images and are linked first.
-      normalized.attachments = role === 'user' ? (message.metadata?.attachments || []).filter(a => typeof a?.id === 'string' && !images.some(i => i.fileId === a.id)).map(a => ({fileId:a.id, name:String(a.name || a.id).split('/').pop(), mime:a.mime_type, size:a.size})) : [];
+      normalized.attachments = attachments;
       if (normalized.attachments.length) {
         const chips = normalized.attachments.map(a => t('md.attachment', `[${a.name.replace(/([\\[\]])/g, '\\$1')}](attachment:${a.fileId})`)).join('\n\n');
         normalized.md = `${chips}\n\n${normalized.md}`;normalized.mdEscaped = `${chips}\n\n${normalized.mdEscaped}`;
@@ -520,7 +564,7 @@
     const title = `# ${conversation.title.replace(/\s+/g,' ').trim()}`;
     return `${yaml ? `${properties(conversation, selected, url, options)}\n\n${title}` : `${title}\n\n${t('md.source', url)}`}\n\n${body}\n${note}`;
   }
-  const api = {fileIdOf,textOf,normalizeText,applyReferences,toolImages,records,samePageRecord,parseTree,loadConversation,downloadFiles,downloadSandboxFiles,sniffImage,dilImageUrls,downloadUrls,csvTable,markdown};
+  const api = {fileIdOf,textOf,normalizeText,applyReferences,toolImages,assetsOf,navigationHint,records,samePageRecord,parseTree,loadConversation,downloadFiles,downloadSandboxFiles,sniffImage,dilImageUrls,downloadUrls,csvTable,markdown};
   root.FastTextExporter = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(globalThis);

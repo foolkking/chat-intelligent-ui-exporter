@@ -12,8 +12,8 @@ globalThis.ReaderSourceFile = (() => {
       // Paginated sources share one small window instead of one per page.
       if(b-a>262144)return decode(await file.slice(a,b).arrayBuffer());
       if (cache.file!==file || a < cache.start || b > cache.start + cache.window.length) {
-        cache.file=file;cache.start=a;
-        cache.window=new Uint8Array(await file.slice(a,a+262144).arrayBuffer());
+        const window=new Uint8Array(await file.slice(a,a+262144).arrayBuffer());
+        Object.assign(cache,{file,start:a,window});
       }
       return decode(cache.window.subarray(a-cache.start,b-cache.start));
     };
@@ -83,14 +83,24 @@ globalThis.ReaderSourceFile = (() => {
     return Object.fromEntries(fields);
   }
   const valid=id=>typeof id==="string"&&/^[\w-]{1,128}$/.test(id);
-  async function tree(file,h,leaf,check,report,checkpoint) {
+  async function navigationEntry(ref,raw,warnings,cost){
+    if(ref.hint!==undefined)return ref.hint;
+    cost.conversions++;
+    const result=FastTextExporter.records([await raw()],{allowEmpty:true});
+    if(result.warnings.length)warnings.push(true);
+    const m=result.messages[0];if(!m)return null;
+    const title=m.role==="user"?(ReaderVisible(m,FastTextExporter).body||"").slice(0,1024).replace(/\s+/g," ").trim().slice(0,220):"";
+    return {id:m.id,role:m.role,title:Array.from(title).join(""),hasFiles:!!(m.images?.length||m.attachments?.length||m.tables?.length)};
+  }
+  async function tree(file,h,leaf,check,report,checkpoint,navigation=false) {
     const range=h.mapping;if(!range)invalid();
     const nodes=new Map(),get=fileReader(file);let candidate,ambiguous=false;
     for await(const f of entries(file,range.start,range.end,true,check,checkpoint)) {
       if(!valid(f.key)||nodes.has(f.key))invalid();
       const n=await get(f.start,f.end);
       if(!n || n.parent!=null&&!valid(n.parent) || n.children!=null&&(!Array.isArray(n.children)||!n.children.every(valid)))invalid();
-      nodes.set(f.key,{parent:n.parent,children:n.children||[],message:n.message?.id,hasMessage:n.message!=null,from:f.start,to:f.end});
+      nodes.set(f.key,{parent:n.parent,children:n.children||[],message:n.message?.id,hasMessage:n.message!=null,from:f.start,to:f.end,
+        hint:navigation?FastTextExporter.navigationHint(n.message):undefined});
       if(leaf&&n.message?.id===leaf){if(candidate)ambiguous=true;candidate=f.key;}
       if(nodes.size%64===0)report({stage:"index",done:nodes.size});
     }
@@ -119,7 +129,21 @@ globalThis.ReaderSourceFile = (() => {
       if(nodes.get(id).message){if(ids.has(nodes.get(id).message))branchFailure();ids.add(nodes.get(id).message);}
     }
     if(selected&&!seen.has(selected))branchFailure();
-    branch.reverse();const warnings=[],byMessage=new Map(branch.filter(k=>nodes.get(k).message).map(k=>[nodes.get(k).message,k]));
+    if(navigation)for(const key of nodes.keys())if(!seen.has(key))nodes.delete(key);
+    branch.reverse();const warnings=[],cost={conversions:0},byMessage=new Map(branch.filter(k=>nodes.get(k).message).map(k=>[nodes.get(k).message,k]));
+    async function rawMessage(id){
+      check();const n=nodes.get(byMessage.get(id));return n?(await get(n.from,n.to)).message:null;
+    }
+    async function* indexRows(){
+      let count=0;
+      for(const key of branch){
+        const pause=checkpoint?.();if(pause)await pause;
+        check();const n=nodes.get(key);if(!n.hasMessage)continue;
+        const entry=await navigationEntry(n,async()=>(await get(n.from,n.to)).message,warnings,cost);
+        if(entry){if(!valid(entry.id))invalid();count++;yield {...entry,sourcePath:[key]};}
+      }
+      if(!count)invalid();
+    }
     async function row(id){
       check();const key=byMessage.get(id);if(!key)return null;
       const n=nodes.get(key),raw=await get(n.from,n.to);
@@ -143,10 +167,10 @@ globalThis.ReaderSourceFile = (() => {
     // DOM attributes can name mapping nodes rather than message IDs. Expose
     // only aliases on the validated branch; keep row IDs and wire paths intact.
     const identities=new Set([...branch,...ids]);
-    return {title:h.title||"ChatGPT",branch:last,source:"conversation-tree",ids,identities,rows,row,warnings};
+    return {title:h.title||"ChatGPT",branch:last,source:"conversation-tree",ids,identities,rows,row,warnings,indexRows,rawMessage,cost};
   }
   // The fork owns source selection and requests. These callbacks only consume each authorized response.
-  function conversation(id,leaf,check,report=()=>{},checkpoint) {
+  function conversation(id,leaf,check,report=()=>{},checkpoint,navigation=false) {
     const keys=new Map(),cache={start:-1,window:new Uint8Array()};let title;
     async function read(response,page) {
       const file=await response.readerFile(page);
@@ -157,16 +181,17 @@ globalThis.ReaderSourceFile = (() => {
       return {file,h};
     }
     return {
-      async tree(response){const {file,h}=await read(response,1);return tree(file,h,leaf,check,report,checkpoint);},
+      async tree(response){const {file,h}=await read(response,1);return tree(file,h,leaf,check,report,checkpoint,navigation);},
       async page(response,number){
         const {file,h}=await read(response,number);
-        if(h.mapping&&number===1)return {result:await tree(file,h,leaf,check,report,checkpoint)};
+        if(h.mapping&&number===1)return {result:await tree(file,h,leaf,check,report,checkpoint,navigation)};
         if(!h.messages||typeof h.page_info?.has_previous_page!=="boolean")invalid("SOURCE_PAGE_INVALID");
         title||=h.title||"ChatGPT";
         const get=fileReader(file,cache);let ordinal=0;
         for await(const f of entries(file,h.messages.start,h.messages.end,false,check,checkpoint)){
           const value=await get(f.start,f.end),m=value?.message??value;if(!valid(m?.id))invalid("SOURCE_PAGE_INVALID");
-          const row={get,from:f.start,to:f.end,time:m.create_time,id:m.id,page:number,ordinal:ordinal++};
+          const row={get,from:f.start,to:f.end,time:m.create_time,id:m.id,page:number,ordinal:ordinal++,
+            hint:navigation?FastTextExporter.navigationHint(m):undefined};
           if(keys.has(m.id)){
             const old=keys.get(m.id),previous=await old.get(old.from,old.to);
             if(!FastTextExporter.samePageRecord(previous,value))invalid("SOURCE_PAGE_CHANGED","Conversation changed between pages.");
@@ -179,7 +204,16 @@ globalThis.ReaderSourceFile = (() => {
         if(h.page_info.has_previous_page)return {before:h.page_info.start_cursor};
         const descriptors=[...keys.values()].sort((a,b)=>b.page-a.page||a.ordinal-b.ordinal);
         if(descriptors.every(m=>Number.isFinite(m.time)))descriptors.sort((a,b)=>a.time-b.time);
-        const warnings=[];
+        const warnings=[],cost={conversions:0};
+        async function rawMessage(id){check();const m=keys.get(id);if(!m)return null;
+          const value=await m.get(m.from,m.to);return value.message??value;}
+        async function* indexRows(){
+          let count=0;
+          for(const m of descriptors){const pause=checkpoint?.();if(pause)await pause;
+            check();const entry=await navigationEntry(m,()=>rawMessage(m.id),warnings,cost);
+            if(entry){count++;yield entry;}}
+          if(!count)invalid();
+        }
         async function* rows() {
           let displayed=false;for(const m of descriptors){check();const value=await m.get(m.from,m.to);
             const r=FastTextExporter.records([value.message??value],{allowEmpty:true});
@@ -188,7 +222,7 @@ globalThis.ReaderSourceFile = (() => {
         }
         async function row(id){check();const m=keys.get(id);if(!m)return null;
           const value=await m.get(m.from,m.to);return FastTextExporter.records([value.message??value],{allowEmpty:true}).messages.find(r=>r.id===id)||null;}
-        return {result:{source:"paginated-conversation",title,ids:new Set(keys.keys()),rows,row,warnings}};
+        return {result:{source:"paginated-conversation",title,ids:new Set(keys.keys()),rows,row,warnings,indexRows,rawMessage,cost}};
       }
     };
   }

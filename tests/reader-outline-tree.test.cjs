@@ -201,3 +201,12 @@ test("expand/collapse all stays metadata-only, keeps the window bounded, and nev
     assert.ok(f.items().length<=64);assert.equal(f.locates.length,0);
   }finally{f.close();}
 });
+test("incremental chapter replacement cannot lend an old ordinal's focus or callback to a different title",()=>{
+  const f=fixture([row("q","user"),row("a","assistant",[{text:"Old",level:2}]),row("q2","user")]);try{
+    f.tree.setActive({id:"a",heading:0},{focus:true});const old=f.item({id:"a",heading:0}),answer=f.item({id:"a"});
+    const next=f.w.ReaderPageIndex.metadata(row("a","assistant",[{text:"New",level:2}]));
+    f.tree.patchChapters(new Map([["a",next]]));
+    assert.equal(f.w.document.activeElement,answer);assert.equal(answer.getAttribute("aria-current"),"location");
+    f.click(old);assert.equal(f.locates.length,0);f.click(f.item({id:"a",heading:0}));assert.equal(f.locates.length,1);
+  }finally{f.close();}
+});

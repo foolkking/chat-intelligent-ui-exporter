@@ -10,6 +10,7 @@
   let pairTimer,taskTimer,sourceDirName,mappings={},mappingScope="",bindingRun=0,targetRun=0,taskPage=0;
   let targetsReady=false,webProject=false,mappingRevision=0;
   const projectDrafts=new Map();
+  const unnamedGroups=new Map();
   let activeGroup="",projectPage=0,collapsed=false,sourceRun=0,refreshing=false,sourceBlocked=false;
   const projectNodes=new Map(),wide=matchMedia("(min-width:661px)");
   const root=navigator.storage.getDirectory();
@@ -23,9 +24,9 @@
   const labels={
     heading:["导入到 Reader","Import to Reader"],"library-link":["Reader 资料库","Reader library"],
     "source-heading":["从哪里导入？","Where are your conversations?"],"web-heading":["ChatGPT 网页","ChatGPT webpage"],
-    "web-note":["只读取你选择的标签页中已发现的对话；目录不完整时不提供整个项目选择。","Read only conversations discovered in the tab you choose. Incomplete directories cannot select an entire project."],
+    "web-note":["显示所选标签页中已发现的对话。","Shows conversations discovered in the selected tab."],
     "web-source":["选择 ChatGPT 标签页","Choose ChatGPT tab"],"archive-heading":["官方导出包","Official data export"],
-    "archive-note":["在本机读取 ZIP；只有确认后的对话及所选附件会发送到 Reader。","Read ZIP locally. Only confirmed conversations and selected files are sent to Reader."],
+    "archive-note":["在本机读取，确认后发送勾选的内容。","Read locally. Confirm which conversations and files to send."],
     "file-copy":["选择 ZIP 或 conversations.json","Choose ZIP or conversations.json"],
     "selection-heading":["选择要保存的对话","Choose conversations to save"],"group-label":["ChatGPT 来源项目","ChatGPT source project"],
     "query-label":["按来源标题筛选","Filter source titles"],"clear-selection":["清空勾选","Clear selection"],
@@ -75,10 +76,16 @@
     "scope-unverified":L("无法核实网页的账号与工作区。可查看已发现的目录，但不能开始批量读取；请使用官方导出包。","The webpage account and workspace could not be verified. Discovered entries can be viewed but not batch-read. Use an official export.")
     ,"source-busy":L("此来源已有保存任务。请先处理原任务。","This source has an existing save task. Resolve it first.")
     ,"source-unavailable":L("无法读取所选 ChatGPT 页面。请保留已登录的原标签页并重试。","The selected ChatGPT page could not be read. Keep its signed-in tab open and retry.")
+    ,"review-changed":L("状态已改变，请重新核对。","State changed. Review again.")
+    ,"background-unavailable":L("后台暂不可用，请重试。","Background unavailable. Retry.")
+    ,"operation-unconfirmed":L("未确认操作，请保留原任务并检查收据。","Operation unconfirmed. Keep the original task and check its receipt.")
+    ,"unfinished-imports":L("先在任务页处理已接收、待核对或可恢复的上传。","Resolve accepted, review or resumable uploads in the task view first.")
+    ,"pending-items":L("请先处理或取消未完成项；已接收的任务不能在这里取消。","Resolve or cancel pending items first. Accepted tasks cannot be cancelled here.")
   };
-  function failure(e){$("error").textContent=errors[e.message]||(
+  function failure(e){$("error").textContent=(Object.hasOwn(errors,e.message)?errors[e.message]:"")||(
     e.name==="QuotaExceededError"?errors["storage-full"]:e.status===401?L("Reader 授权已失效，请重新连接。","Reader authorization expired. Reconnect."):
-      e.status===403?L("没有此操作权限。","This action is not allowed."):e.message||L("操作未完成，可重试。","Not completed. You can retry."));}
+      e.status===403?L("没有此操作权限。","This action is not allowed."):
+      ReaderProgress.sourceReason(e.code,zh)||L("操作未完成，原选择和任务已保留。","Not completed. Selections and tasks are retained."));}
   async function work(fn){$("error").textContent="";try{await fn();}catch(e){if(e.name!=="AbortError")failure(e);}}
   const display=ReaderProgress.throttle(p=>$("activity").textContent=ReaderProgress.describe(p,zh));
   function show(n){step=n;for(const [i,id] of ["source-step","selection-step","target-step","tasks-step"].entries())$(id).hidden=i!==n;
@@ -89,7 +96,11 @@
   }
   function groupName(g){
     if(g==="unknown")return L("归属未知","Membership unknown");if(g==="unclassified")return L("未归类","Unclassified");
-    return source?.groups?.[g]||L("来源项目 ","Source project ")+g.replace(/^project:/,"");
+    const name=ReaderRoutes.projectName(source?.groups?.[g],g.slice(8));
+    if(name)return name;
+    if(!unnamedGroups.has(g))unnamedGroups.set(g,unnamedGroups.size+1);
+    const n=unnamedGroups.get(g);
+    return L(`名称未知的项目 ${n}`,`Unnamed project ${n}`);
   }
   const selectionOptions=()=>({query:$("source-query").value,group:activeGroup,page,
     selectedOnly:$("selection-view").value==="selected"});
@@ -198,6 +209,7 @@
     for(const o of $("source-group").options){const g=byID.get(o.value);if(g)o.textContent=`${o.value?groupName(o.value):L("全部来源项目","All source projects")} (${g.selectedCount}/${g.knownCount})`;}
   }
   function catalogue(){
+    unnamedGroups.clear();
     chosen.clear();page=projectPage=0;collapsed=sourceBlocked=false;activeGroup="";$("source-query").value=$("project-query").value="";$("selection-view").value="all";
     $("refresh-status").textContent="";
     $("source-label").textContent=source.kind==="web"?L("ChatGPT 来源","ChatGPT source"):L("本机导出包","Local export");
@@ -312,7 +324,10 @@
     const {destination,batchMappings=[]}=await storage.get(["destination","batchMappings"]);
     const d=await current();if(n!==targetRun||step!==2||source!==snapshot)return;
     if(d?.id!==owner.id||d.user!==owner.user)throw Error("owner-changed");
-    projects=loaded.filter(p=>uuid(p.id)&&typeof p.name==="string"&&!p.default);
+    projects=loaded.filter(p=>uuid(p.id)&&!p.default).map((p,i)=>{
+      const name=ReaderRoutes.projectName(p.name,p.id);
+      return {id:p.id,name,label:name||L(`名称未知的项目 ${i+1}`,`Unnamed project ${i+1}`)};
+    });
     webProject=caps.web_import_project===true;
     const saved=batchMappings.find(m=>m.origin===READER_ORIGIN&&m.user===device.user&&m.source===source.scope);
     if(mappingScope!==ownerScope){
@@ -375,12 +390,12 @@
     for(const r of source.rows)if(chosen.has(r.id)&&!samples.has(r.group))samples.set(r.group,r.title);
     const groups=$("target-mode").value==="one"?["*"]:[...samples.keys()];
     $("target-mappings").replaceChildren(...groups.map((g,i)=>{
-      const rawName=source.groups?.[g],name=g.startsWith("project:")&&typeof rawName==="string"&&rawName.trim()!==g.slice(8)?rawName.trim():"";
+      const name=g.startsWith("project:")?ReaderRoutes.projectName(source.groups?.[g],g.slice(8)):"";
       const value=(Object.hasOwn(mappings,g)?mappings[g]:mappings["*"])||"";
       mappings[g]=value;
       const draft=projectDrafts.get(g),line=ReaderProjectRow({id:"mapping-"+i,name,projects,value,draft,webCreate:webProject,L,
         label:g==="*"?L("全部已选对话","All selected conversations"):groupName(g),
-        sample:g.startsWith("project:")&&!name?samples.get(g):"",
+        sample:g.startsWith("project:")&&!name?ReaderRoutes.projectName(samples.get(g),g.slice(8)):"",
         selectValue:next=>{if(!targetsReady||!line.isConnected)return;projectDrafts.delete(g);mappings[g]=next;renderTargets(g);},
         edit:()=>{if(!targetsReady||!line.isConnected)return;projectDrafts.set(g,{name});renderTargets(g,"input");},
         cancel:()=>{projectDrafts.delete(g);renderTargets(g);},
@@ -391,7 +406,7 @@
   }
   function confirmCopy(){
     $("confirm-import").disabled=!targetsReady||!chosen.size||!!$("target-mappings").querySelector('[data-ready="false"]');
-    const n=chosen.size;$("confirm-summary").textContent=L(`确认后按此目标逐条处理 ${n} 条对话。已保存的对话不会因此被移动。`,`Process ${n} conversations one at a time with these destinations. Existing records will not be moved.`);
+    const n=chosen.size;$("confirm-summary").textContent=L("已保存的对话保留在原项目。","Previously saved conversations keep their project.");
     $("confirm-import").textContent=L(`确认导入 ${n} 条对话`,`Import ${n} conversations`);
   }
   $("to-target").onclick=()=>work(async()=>{if($("to-target").disabled)return;show(2);await targets();});
@@ -448,7 +463,7 @@
       plan=snapshot.batchPlan;const item=plan.items.find(i=>i.key===key);
       if(!item||item.cancelled||item.skipped)return null;
       const j=(snapshot.jobs||[]).find(j=>j.key===key);
-      if(!j||!j.iid&&!j.packageReady&&!j.active&&!["cancelled","review","result-unavailable"].includes(j.phase))
+      if(!j||!j.iid&&!j.packageReady&&!j.active&&!ReaderProgress.scheduledCheck(j)&&!["cancelled","review","result-unavailable"].includes(j.phase))
         await journal(item,{phase:"source-starting",active:false});
       return item;
     });
@@ -462,9 +477,9 @@
     });
   }
   async function command(key,op="check",extra={}){
-    const wake=await chrome.runtime.sendMessage({kind:"wake"});if(!wake?.ok)throw Error(L("后台暂不可用，请重试。","Background unavailable. Retry."));
+    const wake=await chrome.runtime.sendMessage({kind:"wake"});if(!wake?.ok)throw Error("background-unavailable");
     const r=await chrome.runtime.sendMessage({kind:"panel-host",device:plan.device,op,key,...extra});
-    if(!r?.ok)throw Error(r?.error||L("未确认操作。请检查原收据。","Operation unconfirmed. Check the original receipt."));
+    if(!r?.ok)throw Error(Object.hasOwn(errors,r?.error)?r.error:"operation-unconfirmed");
   }
   $("confirm-import").onclick=()=>work(async()=>{
     if(running||step!==2||$("confirm-import").disabled)return;
@@ -487,6 +502,13 @@
         {origin:READER_ORIGIN,user:d.user,source:snapshot.scope,targets:fixed}]});}
     show(3);await renderTasks();await runQueue();
   });
+  const isolatedSourceFailure=d=>d?.category==="source"&&["SOURCE_FORMAT_INVALID","SOURCE_PAGE_INVALID","SOURCE_PAGE_CHANGED","SOURCE_BRANCH_UNVERIFIED","SOURCE_ATTACHMENT_FAILED"].includes(d.code);
+  async function requestReceipt(item){
+    const receipt=await (await ReaderClient.request(plan.device,"requests/"+item.key)).json();
+    if(!receipt||!Object.hasOwn(receipt,"id")||receipt.id!==null&&!uuid(receipt.id))
+      throw Object.assign(Error("Receipt unconfirmed"),{code:"UPLOAD_RECEIPT_INVALID"});
+    return receipt;
+  }
   async function stage(item){
     if(!source||source.scope!==plan.source.scope)throw Error("source-needed");
     if(source.kind==="web"){
@@ -496,25 +518,36 @@
       for(;;){
         const j=((await storage.get("jobs")).jobs||[]).find(j=>j.key===item.key);
         if(j?.active||j?.iid||j?.packageReady)return;
+        if(j?.phase==="capture-interrupted"&&isolatedSourceFailure(j.diagnostic))return false;
         if(j?.phase!=="source-starting"||Date.now()>until)throw Error("source-unavailable");
         await new Promise(r=>setTimeout(r,300));
       }
     }
-    await navigator.locks.request("reader-local-"+item.key,async()=>{
+    return navigator.locks.request("reader-local-"+item.key,async()=>{
       const d=await current();if(!ReaderBatch.owned(plan,d,READER_ORIGIN))throw Error("owner-changed");
-      const receipt=await (await ReaderClient.request(plan.device,"requests/"+item.key)).json();
+      const receipt=await requestReceipt(item);
       if(uuid(receipt.id)){await journal(item,{iid:receipt.id,phase:"received",active:true});return;}
-      const dir=await (await root).getDirectoryHandle(item.key,{create:true});let sealed=false;
-      const report=ReaderProgress.throttle(p=>{display.update(p);void journal(item,{step:p}).catch(()=>{});},600);
+      const dir=await (await root).getDirectoryHandle(item.key,{create:true});let sealed=false,lastStep={stage:"index",done:0};
+      const report=ReaderProgress.throttle(p=>{lastStep=p;display.update(p);void journal(item,{step:p}).catch(()=>{});},600);
       const check=()=>{if(ownerChanged)throw Error("owner-changed");if(stop)throw new DOMException("Paused","AbortError");};
       try{
-        await journal(item,{phase:"reading",active:true,step:{stage:"index",done:0}});
+        await journal(item,{phase:"reading",active:true,step:lastStep,diagnostic:null});
         const built=await source.build(item.id,dir,{attachments:plan.attachments,check,report:report.update});check();
         if(!ReaderBatch.owned(plan,await current(),READER_ORIGIN))throw Error("owner-changed");
         for await(const [name] of dir)if(name!=="import.zip")await dir.removeEntry(name);
+        report.flush();
         await journal(item,{phase:"upload-paused",active:false,packageReady:true,partial:built.partial,losses:built.losses,
           binding:{size:built.file.size,sha256:built.sha256,project:item.project,excerpt:false},step:null});sealed=true;
-      }catch(e){await journal(item,{phase:e.name==="QuotaExceededError"?"storage-full":"capture-interrupted",active:false,step:null}).catch(()=>{});throw e;}
+      }catch(e){
+        report.flush();
+        const full=e.name==="QuotaExceededError"||e.message==="storage-full";
+        const diagnostic=full?{category:"local-storage",stage:lastStep.stage,recovery:"free_storage"}:ReaderProgress.sourceDiagnostic(e,lastStep.stage);
+        await journal(item,{phase:full?"storage-full":"capture-interrupted",active:false,step:lastStep,diagnostic});
+        // Only a definitively invalid individual record can release the queue.
+        // Storage, owner, file access and pause failures still affect the batch.
+        if(isolatedSourceFailure(diagnostic))return false;
+        throw e;
+      }
       finally{report.close();if(!sealed)await (await root).removeEntry(item.key,{recursive:true}).catch(()=>{});}
     });
   }
@@ -525,7 +558,7 @@
       let claimed;
       try{
         const wake=await chrome.runtime.sendMessage({kind:"wake"});
-        if(!wake?.ok)throw Error(L("后台暂不可用，请重试。","Background unavailable. Retry."));
+        if(!wake?.ok)throw Error("background-unavailable");
         const jobs=(await storage.get("jobs")).jobs||[],items=ReaderBatch.candidates(plan,jobs,retry);
         for(const candidate of items){
           if(stop)break;if(!ReaderBatch.owned(plan,await current(),READER_ORIGIN))throw Error("owner-changed");
@@ -533,7 +566,7 @@
           let j=((await storage.get("jobs")).jobs||[]).find(j=>j.key===item.key);
           // A source capture or accepted server job can outlive this view.
           // Let its host reconcile the existing operation, never start a second one.
-          while(j?.active&&!stop){
+          while((j?.active||ReaderProgress.scheduledCheck(j))&&!stop){
             await renderTasks();await new Promise(r=>setTimeout(r,700));
             if(!ReaderBatch.owned(plan,await current(),READER_ORIGIN))throw Error("owner-changed");
             j=((await storage.get("jobs")).jobs||[]).find(j=>j.key===item.key);
@@ -542,16 +575,16 @@
           if(ReaderBatch.success(j)||["review","cancelled","result-unavailable"].includes(j?.phase))continue;
           if(!j?.iid&&!j?.packageReady){
             // Even an interrupted or unknown result must query its original receipt first.
-            const receipt=await (await ReaderClient.request(plan.device,"requests/"+item.key)).json();
+            const receipt=await requestReceipt(item);
             if(uuid(receipt.id)){await journal(item,{iid:receipt.id,phase:"received",active:true});}
-            else await stage(item);
+            else if(await stage(item)===false)continue;
           }
           if(stop)break;
           j=((await storage.get("jobs")).jobs||[]).find(j=>j.key===item.key);
-          if(!j?.active)await command(item.key,retry?"retry":"check");
+          if(!j?.active&&!ReaderProgress.scheduledCheck(j))await command(item.key,retry?"retry":"check");
           for(;;){
             await renderTasks();j=((await storage.get("jobs")).jobs||[]).find(j=>j.key===item.key);
-            if(!j?.active)break;
+            if(!j?.active&&!ReaderProgress.scheduledCheck(j))break;
             if(stop)break;await new Promise(r=>setTimeout(r,700));
             if(!ReaderBatch.owned(plan,await current(),READER_ORIGIN))throw Error("owner-changed");
           }
@@ -561,7 +594,8 @@
       }catch(e){
         const j=((await storage.get("jobs")).jobs||[]).find(j=>j.key===claimed?.key);
         if(j?.phase==="source-starting"&&!j.active&&!j.iid&&!j.packageReady)
-          await journal(claimed,{phase:"capture-interrupted",active:false}).catch(()=>{});
+          await journal(claimed,{phase:"capture-interrupted",active:false,
+            diagnostic:e.code==="UPLOAD_RECEIPT_INVALID"?{category:"protocol",stage:"upload",code:e.code}:ReaderProgress.sourceDiagnostic(e)}).catch(()=>{});
         throw e;
       }finally{running=false;await savePlan({paused:true}).catch(()=>{});await renderTasks();}
     });
@@ -570,6 +604,7 @@
     if(item.skipped)return L("本次已跳过，原件未改；待核对资料保留在 Reader","Skipped in this plan; original unchanged. Review remains available in Reader.");
     if(item.cancelled&&!j?.iid)return L("未发送，已取消","Cancelled before submission");
     if(!j)return L("等待读取","Waiting to read");
+    if(ReaderProgress.scheduledCheck(j))return L("等待自动核对收据","Receipt check scheduled");
     if(j.active&&j.step)return ReaderProgress.describe(j.step,zh);
     if(j.phase==="done"){
       if(j.partial||j.result?.completeness!=="complete")return L("部分保存或完整性待核对","Partially saved or completeness unverified");
@@ -577,7 +612,7 @@
         appended:L(`已在末尾追加 ${j.result.added_messages} 条消息`,`${j.result.added_messages} messages appended`),
         separate_copy:L("已另存，原件未改","Saved separately; original unchanged")}[j.result.action]||L("已处理","Processed");
     }
-    return {reading:L("正在读取","Reading"),"capture-interrupted":L("读取已暂停，未发送","Reading paused; not sent"),
+    return {reading:L("正在读取","Reading"),"capture-interrupted":ReaderProgress.sourceReason(j.diagnostic?.code,zh)||L("读取已暂停，未发送","Reading paused; not sent"),
       "storage-full":errors["storage-full"],review:L("需要核对，尚未保存","Needs review; not saved"),
       "upload-paused":L("上传暂停，原包保留","Upload paused; original package retained"),reconnect:L("需重新授权","Reconnect required"),
       "upload-unknown":L("回执待核对","Receipt unconfirmed"),check:L("状态待核对","Status unconfirmed"),attention:L("Reader 处理失败或需要检查","Reader processing failed or needs attention"),
@@ -593,7 +628,7 @@
       const j=byKey.get(i.key);if(i.skipped||i.cancelled||["cancelled","result-unavailable"].includes(j?.phase))return "done";
       if(j?.review)return "review";
       if(j?.phase==="done")return j.partial||j.result?.completeness!=="complete"?"attention":"done";
-      return !j||j.active||j.phase==="source-starting"?"waiting":"attention";
+      return !j||j.active||ReaderProgress.scheduledCheck(j)||j.phase==="source-starting"?"waiting":"attention";
     };
     const complete=plan.items.filter(i=>ReaderBatch.success(byKey.get(i.key))).length,accepted=plan.items.filter(i=>byKey.get(i.key)?.iid).length;
     const skipped=plan.items.filter(i=>i.skipped).length;
@@ -618,7 +653,9 @@
         const j=byKey.get(item.key),li=el("li"),copy=el("div"),actions=el("div",null,"result-actions");li.dataset.key=item.key;
         copy.append(el("div",item.title,"title"),el("div",stateCopy(j,item),"meta"));
         const actual=j?.result?.current_project;
-        if(actual)copy.append(el("div",L("实际保存位置：","Saved destination: ")+(actual.state==="project"?actual.name:actual.state==="unclassified"?L("未归类","Unclassified"):L("项目不可用","Project unavailable")),"meta"));
+        if(actual)copy.append(el("div",L("实际保存位置：","Saved destination: ")+(actual.state==="project"?
+          ReaderRoutes.projectName(actual.name,actual.id)||L("项目名称未知","Project name unavailable"):
+          actual.state==="unclassified"?L("未归类","Unclassified"):L("项目不可用","Project unavailable")),"meta"));
         if(j?.phase==="done"&&uuid(j.cid)){const a=el("a",L("打开 Reader","Open Reader"));a.href=READER_ORIGIN+"/conversations/"+j.cid;a.target="_blank";a.rel="noopener noreferrer";a.dataset.action="open";actions.append(a);}
         if(j?.review&&!item.skipped){
           const r=j.review;copy.append(el("p",[r.partial?L("部分附件或交互内容缺失","Some files or interactive content are missing"):"",
@@ -630,11 +667,12 @@
           if(uuid(r.conversation_id)){const a=el("a",L("查看原件","View original"));a.href=READER_ORIGIN+"/conversations/"+r.conversation_id;a.target="_blank";a.rel="noopener noreferrer";actions.append(a);}
           actions.append(btn(L("跳过本次，保留原件","Skip; keep original"),async()=>{
             const fresh=((await storage.get("jobs")).jobs||[]).find(x=>x.key===item.key&&x.device===plan.device);
-            if(!fresh?.review||fresh.active||fresh.review.receipt!==r.receipt)throw Error(L("状态已改变，请重新核对。","State changed. Review again."));
+            if(!fresh?.review||fresh.active||fresh.review.receipt!==r.receipt)throw Error("review-changed");
             // This dismisses only this plan item. It cannot cancel a server job or delete its source.
             await changeItems(items=>items.map(i=>i.key===item.key?{...i,skipped:true}:i));await renderTasks();
           }));
-        }else if(j&&!j.active&&!ReaderBatch.success(j)&&!item.cancelled&&!item.skipped){const b=btn(L("检查原收据","Check original receipt"),async()=>{await command(item.key);await renderTasks();});b.dataset.action="check";actions.append(b);
+        }else if(j&&!j.active&&!ReaderBatch.success(j)&&!item.cancelled&&!item.skipped){if(!ReaderProgress.scheduledCheck(j)&&!isolatedSourceFailure(j.diagnostic)){
+          const b=btn(L("检查原收据","Check original receipt"),async()=>{await command(item.key);await renderTasks();});b.dataset.action="check";actions.append(b);}
           if(j.packageReady)actions.append(btn(L("取消未接收的上传","Cancel unreceived upload"),async()=>{await command(item.key,"discard");await renderTasks();}));}
         li.append(copy,actions);return li;
       }));$("task-rows").dataset.signature=signature;
@@ -660,7 +698,7 @@
   $("forget-plan").onclick=()=>work(async()=>{
     if(running||!plan)return;
     const jobs=(await storage.get("jobs")).jobs||[];
-    if(plan.items.some(i=>!i.skipped&&ReaderBatch.pending(jobs.find(j=>j.key===i.key))))throw Error(L("先在任务页处理已接收、待核对或可恢复的上传。","Resolve accepted, review or resumable uploads in the task view first."));
+    if(plan.items.some(i=>!i.skipped&&ReaderBatch.pending(jobs.find(j=>j.key===i.key))))throw Error("unfinished-imports");
     await storage.remove("batchPlan");plan=null;await resumeBox();
   });
   $("pause-queue").onclick=()=>{stop=true;$("pause-queue").disabled=true;};
@@ -677,7 +715,7 @@
   $("new-import").onclick=()=>work(async()=>{
     const jobs=(await storage.get("jobs")).jobs||[];
     if(plan.items.some(i=>{const j=jobs.find(j=>j.key===i.key);return !i.cancelled&&!i.skipped&&(!j||ReaderBatch.pending(j));}))
-      throw Error(L("请先处理或取消未完成项；已接收的任务不能在这里取消。","Resolve or cancel pending items first. Accepted tasks cannot be cancelled here."));
+      throw Error("pending-items");
     await storage.remove("batchPlan");plan=null;await clearSource();show(0);await resumeBox();
   });
   async function chooseWeb(container,accept){

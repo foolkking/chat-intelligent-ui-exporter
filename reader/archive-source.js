@@ -98,7 +98,11 @@ globalThis.ReaderLocalArchive=(()=>{
             if(member&&!path){
               path="assets/"+(++fileCount)+"-"+member.name.split("/").at(-1).replace(/[^\p{L}\p{N}_.-]/gu,"_").slice(-100);
               const handle=await output.getFileHandle("asset-"+fileCount,{create:true});
-              await zip.extract(member,handle,p=>progress({stage:"asset",files:fileCount,done:p.done,total:p.total}));
+              try{await zip.extract(member,handle,p=>progress({stage:"asset",files:fileCount,done:p.done,total:p.total}));}
+              catch(e){
+                if(e.message==="archive-format")throw Object.assign(Error("Archive attachment failed integrity checks"),{code:"SOURCE_ATTACHMENT_FAILED"});
+                throw e;
+              }
               seen.set(member.name,path);assets.set(path,handle);
             }
             if(path){

@@ -36,9 +36,10 @@ async function fixture({plan=old,jobs=[],shared,search="",tabs=[],rows=[{id:"one
     async removeEntry(name){removed.push(name);}};
   w.navigator.storage={getDirectory:async()=>root};w.READER_ORIGIN=device.origin;w.crypto.randomUUID=()=>crypto.randomUUID();
   w.ChatExportI18n={setLocale(){}};
-  w.ReaderProgress={throttle:f=>({update:f,flush(){},close(){}}),describe:()=>"Reading"};
+  w.eval(fs.readFileSync(path.join(dir,"progress.js"),"utf8"));
   w.ReaderLocalArchive={open:async()=>({digest:"same-source",rows:clone(rows),...archive,
-    build:async()=>{calls.push("build");return {file:{size:10},sha256:"a".repeat(64),partial:false,losses:{}};}})};
+    build:async(...args)=>{calls.push("build");return archive.build ? archive.build(...args) :
+      {file:{size:10},sha256:"a".repeat(64),partial:false,losses:{}};}})};
   w.ReaderClient={trust:Promise.resolve(),confirmProject:(d,name)=>backend.confirmProject(d,name),request:async(_d,p,opts={})=>{
     calls.push(p);requests.push({device:_d,path:p,method:opts.method||"GET",body:opts.body});
     return {json:async()=>p==="capabilities"?{protocol:1,import_profile:"reader-chat-v1",capture:true,resumable_capture:true,source_lookup:backend.sourceLookup,web_import_project:backend.webCreate}:
@@ -245,6 +246,66 @@ const mappingFixture={plan:null,webCreate:true,rows:[{id:"first",title:"Conversa
   {id:"second",title:"Conversation Two",group:"project:opaque"}],archive:{groups:{"project:known":"Synthetic A"}}};
 const mappingRow=(f,i)=>f.w.document.querySelector("#mapping-"+i).closest(".mapping-row");
 const submitName=(f,i)=>mappingRow(f,i).querySelector("form").onsubmit(new f.w.Event("submit",{cancelable:true}));
+test("unnamed groups stay distinguishable in the directory and mapping without exposing identifiers",async()=>{
+  const a="g-p-"+"a".repeat(32),b="g-p-"+"b".repeat(32),groups={["project:"+a]:a+"-slug"};
+  const rows=[a,b,"named"].map((id,i)=>({id:"row"+i,title:"Example "+i,group:"project:"+id}));
+  groups["project:named"]="Research";
+  const f=await fixture({plan:null,rows,archive:{groups},projects:[{id:projectA,name:projectA}]});
+  try{
+    await f.choose([0,1,2]); const d=f.w.document;
+    const unknown=[...d.querySelectorAll("#target-mappings .mapping-row label")].map(n=>n.textContent);
+    assert.notEqual(unknown[0],unknown[1]);assert.equal(unknown[2],"Research");
+    for(const id of [a,b,projectA]){
+      assert.ok(!d.querySelector("#target-mappings").textContent.includes(id));
+      assert.ok(!d.querySelector("#project-groups").textContent.includes(id));
+      assert.ok(![...d.querySelectorAll("#selection-step [aria-label]")].some(n=>n.getAttribute("aria-label").includes(id)));
+    }
+    assert.match(mappingRow(f,0).textContent,/Example 0/);
+    assert.match(mappingRow(f,1).textContent,/Example 1/);
+    assert.ok([...d.querySelector("#mapping-0").options].some(o=>o.value===projectA));
+    mappingRow(f,0).querySelector("button").click();
+    assert.equal(d.querySelector("#mapping-0-name").value,"","a display fallback cannot seed a project name");
+  }finally{f.close();}
+});
+test("a malformed archive conversation preserves final measured progress and does not block its healthy sibling",async()=>{
+  const reached=[],rows=sourceRows().slice(0,2);
+  const f=await fixture({plan:null,rows,archive:{async build(id,dir,{report}){
+    reached.push(id);
+    if(id==="one"){
+      report({stage:"messages",done:1,textBytes:5});report({stage:"messages",done:2,textBytes:17});
+      throw Object.assign(Error("synthetic-private-body"),{code:"SOURCE_FORMAT_INVALID"});
+    }
+    return {file:{size:10},sha256:"a".repeat(64),partial:false,losses:{}};
+  }}});
+  try{
+    await f.choose([0,1]);await f.w.document.querySelector("#confirm-import").onclick();
+    assert.deepEqual(reached,["one","two"]);
+    const [bad,good]=f.state.batchPlan.items.map(i=>f.state.jobs.find(j=>j.key===i.key));
+    assert.equal(bad.phase,"capture-interrupted");assert.ok(!bad.active&&!bad.packageReady&&!bad.iid);
+    assert.equal(bad.diagnostic.code,"SOURCE_FORMAT_INVALID");assert.equal(bad.step.textBytes,17);assert.equal(bad.step.done,2);
+    assert.equal(bad.diagnostic.stage,"messages");assert.ok(good.packageReady);
+    assert.ok(!JSON.stringify(f.state.jobs).includes("synthetic-private-body"));
+    assert.match(f.w.document.querySelector("#task-rows").textContent,/source format/i);
+  }finally{f.close();}
+});
+test("storage, cancellation and ownership failures still stop the batch; unknown errors never expose their payload",async()=>{
+  for(const error of [
+    Object.assign(Error("private storage payload"),{name:"QuotaExceededError"}),
+    Object.assign(Error("private cancellation payload"),{name:"AbortError"}),
+    Error("owner-changed"),Error("private unknown payload")
+  ]){
+    const reached=[],f=await fixture({plan:null,rows:sourceRows().slice(0,2),archive:{async build(id){
+      reached.push(id);throw error;
+    }}});
+    try{
+      await f.choose([0,1]);await f.w.document.querySelector("#confirm-import").onclick();
+      assert.deepEqual(reached,["one"]);assert.ok(f.state.batchPlan.paused);
+      assert.equal(f.state.jobs.filter(j=>j.phase==="done").length,0);
+      assert.ok(!JSON.stringify(f.state.jobs).includes("private"));
+      assert.ok(!f.w.document.querySelector("#error").textContent.includes("private"));
+    }finally{f.close();}
+  }
+});
 test("same-name reuse and explicitly named creation freeze only the verified Reader UUIDs in the import plan",async()=>{
   const f=await fixture({...mappingFixture,projects:[projectRows()[0]]});try{
     await f.choose([0,1]);const doc=f.w.document;

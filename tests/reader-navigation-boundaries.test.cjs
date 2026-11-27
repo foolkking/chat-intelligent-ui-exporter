@@ -93,6 +93,16 @@ test("only mounted directory links count across manual pages; quoted nav and pro
     assert.equal(next.rows.find(r=>r.id==="next").group,"project:g-p-alpha");assert.equal(p.fetches(),2,"no project or history enumeration requests");
   }finally{p.close();}
 });
+test("a mounted project label can use its explicit accessible name, without querying the account directory",async()=>{
+  const id="g-p-"+"ab".repeat(16);
+  const p=await workspace("https://chatgpt.com/",`<nav><a href="/g/${id}/project" aria-label="Research">${id}</a>
+    <a href="/g/${id}/c/example">Example conversation</a></nav>`);
+  try{
+    const r=await p.discover();assert.equal(r.groups["project:"+id],"Research");
+    assert.equal(r.complete,false);assert.equal(p.fetches(),1);
+    assert.equal(r.rows.find(x=>x.id==="example").group,"project:"+id);
+  }finally{p.close();}
+});
 test("a localized project-home slug names bare project chats by stable ID; conflicting or cross-site labels are not suggested",async()=>{
   const id="g-p-"+"0123456789abcdef".repeat(2);
   const p=await workspace("https://chatgpt.com/",`<nav><a href="/g/${id}-%E6%B5%B7%E6%B4%8B/project">海洋</a>

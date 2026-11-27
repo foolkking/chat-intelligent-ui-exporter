@@ -5,6 +5,23 @@ function fixture(){
   for(const f of ["progress.js","progress-view.js"])w.eval(fs.readFileSync(path.join(__dirname,"../reader",f),"utf8"));
   const view=w.ReaderProgressView({zh:true});w.document.body.append(view.root);return {w,view,close:()=>w.close()};
 }
+test("unmeasured stages are hidden; explicit zeroes, failures and recovery stay visible without claiming saved",()=>{
+  const p=fixture();try{
+    const row=key=>p.view.root.querySelector(`[data-stage="${key}"]`);
+    p.view.update({state:"saving",step:{stage:"source",done:0},stats:{sourceBytes:0}});
+    assert.equal(row("source").hidden,false);assert.equal(row("asset").hidden,true);assert.equal(row("server").hidden,true);
+    p.view.update({state:"failed",stats:{sourceBytes:17,assetBytes:0},diagnostic:{category:"source",stage:"asset",code:"SOURCE_ATTACHMENT_FAILED"}});
+    assert.equal(row("source").hidden,false);assert.equal(row("asset").hidden,false);assert.equal(row("package").hidden,true);
+    assert.match(p.view.root.textContent,/附件读取失败/);
+    const job={phase:"upload-paused",active:false,nextCheckAt:Date.now()+1000};
+    assert.equal(p.w.ReaderProgressView.stateForJob(job),"recovering");
+    p.view.update({state:"recovering",stats:{sourceBytes:17,assetBytes:0},step:{stage:"asset",done:5,total:10}});
+    assert.equal(p.view.root.querySelector(".progress-current").hidden,true);
+    assert.equal(p.view.root.querySelectorAll('[data-active="true"]').length,0);
+    assert.match(row("server").textContent,/自动核对/);
+    assert.equal(row("server").hidden,false);assert.equal(row("asset").hidden,false);
+  }finally{p.close();}
+});
 test("cumulative task rows survive phase changes without summing per-resource resets or inventing totals",()=>{
   const p=fixture();try{
     let stats=p.w.ReaderProgress.accumulate(null,{stage:"source",sourceBytes:2097152,sourcePages:2,done:1048576});

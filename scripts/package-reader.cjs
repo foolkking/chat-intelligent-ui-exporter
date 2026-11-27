@@ -33,7 +33,7 @@ const key=fs.readFileSync(path.join(root,"reader/public-key.txt"),"ascii").trim(
 const id=crypto.createHash("sha256").update(Buffer.from(key,"base64")).digest("hex").slice(0,32).replace(/[0-9a-f]/g,c=>String.fromCharCode(97+parseInt(c,16)));
 fs.writeFileSync(path.join(out,"config.js"),`globalThis.READER_ORIGIN=${JSON.stringify(u.origin)};\n`);
 fs.writeFileSync(path.join(out,"manifest.json"),JSON.stringify({
-  manifest_version:3, minimum_chrome_version:"116", name:"Chat Reader", version:"0.3.0", key,
+  manifest_version:3, minimum_chrome_version:"116", name:"Chat Reader", version:"0.3.1", key,
   description:"Browse your Reader library and save the current conversation.",
   action:{default_title:"Chat Reader",default_icon:{"16":"icons/icon16.png","32":"icons/icon32.png"}},icons:{"16":"icons/icon16.png","32":"icons/icon32.png","48":"icons/icon48.png","128":"icons/icon128.png"},
   permissions:["identity","storage","offscreen","downloads","alarms","sidePanel"],

@@ -26,7 +26,7 @@ test("the CI reference and private installer are independent of Git checkout lin
   for(let i=0;i<2;i++)assert.ok(results[0][i].bytes.equals(results[1][i].bytes),"checkout changed ZIP bytes");
   assert.ok(original.bytes.equals(results[0][0].bytes));
   const packed=unzipSync(original.bytes);
-  assert.equal(JSON.parse(Buffer.from(packed["manifest.json"])).version,"0.3.0");
+  assert.equal(JSON.parse(Buffer.from(packed["manifest.json"])).version,"0.3.1");
   assert.ok(packed["center-selection.js"],"The actual selection model must be in both checkout variants.");
   for(const size of [16,32,48,128])
     assert.ok(Buffer.from(unzipSync(original.bytes)[`icons/icon${size}.png`]).equals(fs.readFileSync(path.join(root,`reader/icons/icon${size}.png`))));

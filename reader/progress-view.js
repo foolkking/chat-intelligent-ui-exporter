@@ -19,7 +19,7 @@ globalThis.ReaderProgressView = ({zh=false}={}) => {
   const number=v=>Number.isSafeInteger(v)&&v>=0;
   function update({step,stats,startedAt,finishedAt,state,diagnostic,taskPhase}={}){
     const values=ReaderProgress.accumulate(null,stats),phase=ReaderProgress.snapshot(step),pending=L("等待","Waiting");
-    const stopped=["saved","copy","partial","failed","review","uncertain","paused","cancelled","reconnect","previous","append-ready","append-complete","append-partial","append-review","append-processed","system-hold"].includes(state);
+    const stopped=["saved","copy","partial","failed","review","uncertain","paused","recovering","cancelled","reconnect","previous","append-ready","append-complete","append-partial","append-review","append-processed","system-hold"].includes(state);
     const measured=(key,unit="")=>number(values[key])?values[key]+unit:pending;
     const bytes=key=>number(values[key])?size(values[key]):pending;
     const read=number(values.sourceBytes)||number(values.assetBytes);
@@ -45,6 +45,7 @@ globalThis.ReaderProgressView = ({zh=false}={}) => {
       ["saved","copy","partial"].includes(state)?
       state==="partial"?L("部分内容已保存","Available content saved"):L("已确认保存","Save confirmed"):
       state==="failed"?L("尚未完成 · 诊断已保留","Incomplete · diagnostics retained"):
+      state==="recovering"?L("等待自动核对收据","Receipt check scheduled"):
       state==="uncertain"?L("结果待核对","Result unconfirmed"):
       state==="review"?L("等待核对所选内容或变更","Review selected content or changes"):
       state==="cancelled"?L("已取消 · 记录已保留","Cancelled · measurements retained"):
@@ -55,7 +56,11 @@ globalThis.ReaderProgressView = ({zh=false}={}) => {
     const activeStage=["received","processing","queued","resource-wait"].includes(taskPhase)?"server":phase?.stage;
     if(!stopped&&taskPhase==="resource-wait")rows.get("server").value.textContent=L("已接收 · 等待可用资源","Received · waiting for available resources");
     else if(!stopped&&taskPhase==="received")rows.get("server").value.textContent=L("已接收 · 等待处理","Received · awaiting processing");
-    for(const [key,{line}] of rows)line.dataset.active=String(!stopped&&activeStage===key);
+    for(const [key,{line,value}] of rows){
+      const active=!stopped&&activeStage===key;
+      line.dataset.active=String(active);
+      line.hidden=!active&&value.textContent===pending&&diagnostic?.stage!==key;
+    }
     current.hidden=stopped||activeStage!=="asset";
     if(!current.hidden){
       currentText.textContent=L("当前附件","Current file")+(phase.files?" "+phase.files:"")+
@@ -70,10 +75,8 @@ globalThis.ReaderProgressView = ({zh=false}={}) => {
       mapping:["匹配数据","Map data"],normalization:["规范化内容","Normalize content"],validation:["验证内容","Validate content"],server:["服务端处理","Server processing"]};
     failureStage.hidden=!(stopped&&reason?.stage&&stages[reason.stage]);
     failureStage.textContent=failureStage.hidden?"":L("停止阶段：","Stopped at: ")+L(...stages[reason.stage]);
-    const reasons={SOURCE_FORMAT_INVALID:["来源格式无法识别","Unrecognized source format"],SOURCE_PAGE_INVALID:["分页信息无效","Invalid history page"],
-      SOURCE_PAGE_CHANGED:["重叠分页记录不一致","Overlapping history records differ"],SOURCE_BRANCH_UNVERIFIED:["无法确认当前分支","Branch not verified"],
-      SOURCE_ATTACHMENT_FAILED:["附件读取失败","File read failed"],SOURCE_HTTP_FAILED:["来源请求失败","Source request failed"],NETWORK_UNAVAILABLE:["网络中断","Network interrupted"]};
-    if(!failureStage.hidden&&Object.hasOwn(reasons,reason.code))failureStage.textContent+=" · "+L(...reasons[reason.code]);
+    const cause=ReaderProgress.sourceReason(reason?.code,zh);
+    if(!failureStage.hidden&&cause)failureStage.textContent+=" · "+cause;
     recovery.textContent=stopped&&reason?.recovery?({
       system_support:L("系统处理异常。请保留原任务；重复提交同一个包不能解决问题，可复制诊断供修复。",
         "A system processing issue needs repair. Keep the original task; resubmitting the same archive will not fix it. Diagnostics are available to copy."),
@@ -102,6 +105,7 @@ ReaderProgressView.stateForJob=j=>{
   if(j.diagnostic?.recovery==="system_support"&&!j.active)return "system-hold";
   if(j.phase==="append-ready")return "append-ready";
   if(j.phase==="review")return "review";
+  if(ReaderProgress.scheduledCheck(j))return "recovering";
   if(j.phase==="cancelled")return "cancelled";
   if(j.active)return "saving";
   if(j.phase==="reconnect")return "reconnect";

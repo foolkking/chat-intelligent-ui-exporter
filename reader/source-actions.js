@@ -30,6 +30,7 @@ function sourceDisplay(j,attempt){
     return j.result.action==="separate_copy"?"copy":"saved";
   }
   if(j.phase==="review")return "review";
+  if(ReaderProgress.scheduledCheck(j))return "recovering";
   if(j.packageReady&&!j.active)return "paused";
   if(j.phase==="upload-unknown"||j.phase==="check")return "uncertain";
   if(j.active)return "saving";
@@ -87,7 +88,7 @@ async function act(m,s,path,host){
     // receipt IDs, device IDs or an actionable transfer key to the source page.
     const progressKey=j?await sourceKey("display\0"+device.id+"\0"+j.key):null;
     if(!await stillHere(s,path,device.id))return {error:"changed"};
-    return {state,progressKey,name:dest?.showName?String(dest.name||"").slice(0,120):"",canSave:!!dest,
+    return {state,progressKey,name:dest?.showName?ReaderRoutes.projectName(dest.name,dest.project).slice(0,120):"",canSave:!!dest,
       ...(j?{step:ReaderProgress.snapshot(j.step),stats:ReaderProgress.accumulate(null,j.stats),
         taskPhase:["reading","uploading","received","processing","queued","resource-wait","review","done",
           "cancelled","attention","capture-interrupted","upload-paused","upload-unknown","reconnect","check",

@@ -11,7 +11,7 @@ test("Reader keeps its ID, ChatGPT-only injection and a private native import su
   assert.ok(scripts.indexOf("workspace.js")<scripts.indexOf("capture.js"));
   assert.ok(scripts.indexOf("surface-state.js")>=0&&scripts.indexOf("surface-state.js")<scripts.indexOf("overlay.js"));
   assert.ok(scripts.indexOf("outline-tree.js")>scripts.indexOf("page-index.js")&&scripts.indexOf("outline-tree.js")<scripts.indexOf("overlay.js"));
-  assert.equal(m.version,"0.3.0");
+  assert.equal(m.version,"0.3.1");
   for(const name of ["center.html","center.css","center.js","center-selection.js","batch-model.js","zip-source.js","archive-source.js","workspace.js","batch-worker.js","i18n.js","fast-text.js"])
     assert.ok(fs.existsSync(path.join(out,name)),"Unpackaged import-center dependency: "+name);
   for(const name of ["local-picker.js","local-source.js"])assert.ok(!fs.existsSync(path.join(out,name)),"Obsolete import path packaged: "+name);

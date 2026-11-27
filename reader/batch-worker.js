@@ -81,6 +81,7 @@ chrome.runtime.onMessage.addListener((m,s,reply)=>{
       const caps=await (await ReaderClient.request(device.id,"capabilities")).json();
       if(!caps.capture||!caps.resumable_capture||caps.import_profile!=="reader-chat-v1")throw Error("upgrade-required");
       const receipt=await (await ReaderClient.request(device.id,"requests/"+item.key)).json();
+      if(!receipt||!Object.hasOwn(receipt,"id")||receipt.id!==null&&!saveUuid(receipt.id))throw Error("receipt-exists");
       if(receipt.id)throw Error("receipt-exists"); // center must reconcile the old receipt, not start another capture
       await current();await host();
       if(!await liveBatch(c))throw Error("source-changed");

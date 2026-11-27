@@ -71,9 +71,10 @@ function dateLabel(value){
     new Intl.DateTimeFormat(zh?"zh-CN":"en",{...(now.getFullYear()!==d.getFullYear()?{year:"numeric"}:{}),month:"short",day:"numeric"}).format(d);
   const t=node("time","",text);t.dateTime=d.toISOString();t.title=d.toLocaleString();return t;
 }
-const projectName=s=>s?.state==="unclassified"?L("未归类","Unclassified"):s?.state==="project"?s.name:L("项目不可用","Project unavailable");
+const projectName=s=>s?.state==="unclassified"?L("未归类","Unclassified"):s?.state==="project"?
+  ReaderRoutes.projectName(s.name,s.id)||L("项目名称未知","Project name unavailable"):L("项目不可用","Project unavailable");
 const pOptions=(f,all)=>{f.replaceChildren(...(all?[opt("",L("所有项目","All projects")),opt("unclassified",L("未归类","Unclassified"))]:[opt("",L("未归类","Unclassified"))]),
-  ...projects.filter(p=>!p.default).map(p=>opt(p.id,p.name)));};
+  ...projects.filter(p=>!p.default).map((p,i)=>opt(p.id,ReaderRoutes.projectName(p.name,p.id)||L(`名称未知的项目 ${i+1}`,`Unnamed project ${i+1}`))));};
 function focus(el){if(el?.isConnected&&!el.hidden)el.focus({preventScroll:true});}
 function closeMenu(restore=false){const m=$("row-menu");if(m.matches(":popover-open"))m.hidePopover();menuOwner?.setAttribute("aria-expanded","false");if(restore)focus(menuOwner);}
 function positionMenu(){
@@ -140,9 +141,16 @@ function row(item){
   a.className="row-title";const lead=glyph(item.pinned?"pin":"chat");lead.classList.add("lead");if(item.pinned)lead.classList.add("pinned");
   const title=item.title||L("无标题对话","Untitled conversation"),name=node("span","name");
   name.append(lead,title);if(item.pinned)name.append(node("span","sr",L("（已置顶）"," (pinned)")));copy.append(name,meta);
-  const pname=item.project_unavailable?L("项目不可用","Project unavailable"):item.project_name||projects.find(p=>p.id===item.project_id)?.name||L("未归类","Unclassified");
-  const p=node("span","project",pname);p.title=pname;meta.append(p);
-  const t=dateLabel(item.date);if(t){const dot=node("span","sep","·");dot.setAttribute("aria-hidden","true");meta.append(dot,t);t.title=(item.date_kind==="opened"?L("最近打开：","Last opened: "):item.date_kind==="imported"?L("导入：","Imported: "):L("更新：","Updated: "))+t.title;}
+  const pname=item.project_unavailable?L("项目不可用","Project unavailable"):ReaderRoutes.projectName(item.project_name,item.project_id)||
+    (item.project_id?projectName({state:"project",id:item.project_id,name:projects.find(p=>p.id===item.project_id)?.name}):L("未归类","Unclassified"));
+  const filter=$("filter").value;
+  if(item.project_unavailable||!filter||filter!==(item.project_id||"unclassified")){
+    const p=node("span","project",pname);p.title=pname;meta.append(p);
+  }
+  const t=dateLabel(item.date);if(t){
+    if(meta.childElementCount){const dot=node("span","sep","·");dot.setAttribute("aria-hidden","true");meta.append(dot);}
+    meta.append(t);t.title=(item.date_kind==="opened"?L("最近打开：","Last opened: "):item.date_kind==="imported"?L("导入：","Imported: "):L("更新：","Updated: "))+t.title;
+  }
   if(item.attachment_count>0){const clip=node("span","clip");clip.append(glyph("file"),String(item.attachment_count));label(clip,L(`${item.attachment_count} 个附件`,`${item.attachment_count} attachments`));meta.append(clip);}
   if(item.attachment_match||item.match_kind==="attachment")meta.append(node("span","hit",L("附件匹配","File match")));
   a.append(copy);const b=node("button","icon row-more");icon(b,"more",L("更多：","More: ")+title);b.setAttribute("aria-expanded","false");b.setAttribute("aria-controls","row-menu");b.onclick=()=>openMenu(item,b);li.append(a,b);if(pendingRows.has(item.id))rowPending(b);return li;

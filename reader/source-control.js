@@ -49,6 +49,7 @@ globalThis.ReaderSourceControl=({pathId,capture,cancel})=>{
     progressText.textContent=["saved","copy","partial","append-ready","append-complete","append-partial","append-review","append-processed","system-hold","cancelled"].includes(state)?names[state][0]:
       state==="failed"?L("保存尚未完成 · 记录已保留","Save incomplete · measurements retained"):
       state==="review"?L("可用内容已接收 · 等待核对","Available content received · review needed"):
+      state==="recovering"?L("等待自动核对收据","Receipt check scheduled"):
       state==="paused"?L("上传已暂停 · 可继续原任务","Upload paused · original task can resume"):
       state==="uncertain"?L("保存结果待核对","Save result unconfirmed"):
       state==="saving"&&["received","processing","queued","resource-wait"].includes(taskPhase)?
@@ -76,7 +77,7 @@ globalThis.ReaderSourceControl=({pathId,capture,cancel})=>{
     "append-partial":[L("可用内容已追加","Available content appended"),"warning"],
     "append-review":[L("重新核对追加","Review append again"),"warning"],
     "append-processed":[L("查看追加结果","View append result"),"book"],
-    "system-hold":[L("查看处理诊断","View processing diagnostics"),"book"],
+    "system-hold":[L("查看处理诊断","View processing diagnostics"),"book"],recovering:[L("等待自动核对","Receipt check scheduled"),"clock"],
     cancelled:[L("读取已取消","Capture cancelled"),"upload"],
     previous:[L("打开已存版本","Open saved version"),"book"],partial:[L("部分已保存","Partially saved"),"warning"],
     review:[L("需要确认","Review save"),"warning"],uncertain:[L("核对保存结果","Check save result"),"warning"],
@@ -108,7 +109,7 @@ globalThis.ReaderSourceControl=({pathId,capture,cancel})=>{
     if(state==="save"&&name){const sm=make("small","");sm.textContent="· "+name;main.append(sm);}
     if(["saved","copy","partial","previous"].includes(state)){const ext=g("external");ext.style.width="12px";main.append(ext);}
     const aria=[word,state==="save"&&name,hint].filter(Boolean).join(" · ");main.title=aria;main.setAttribute("aria-label",aria);
-    main.disabled=busy||state==="saving"||state==="checking";bar.dataset.tone=["partial","append-partial","review","uncertain","failed","reconnect"].includes(state)?"warning":"normal";
+    main.disabled=busy||state==="saving"||state==="checking"||state==="recovering";bar.dataset.tone=["partial","append-partial","review","uncertain","failed","reconnect"].includes(state)?"warning":"normal";
     toggle.hidden=state==="project";bar.dataset.project=String(state==="project");
     if(!menu.hidden)fillMenu();
   }
@@ -154,7 +155,7 @@ globalThis.ReaderSourceControl=({pathId,capture,cancel})=>{
     }catch(e){
       if(path!==route)return;busy=false;
       if(e.displayState){state=e.displayState;resetProgress();paint();if(["destination","connect"].includes(state))await panel();}
-      else{await refresh();if(!["review","uncertain","saving","saved","copy","partial","reconnect","paused","cancelled","system-hold"].includes(state)){
+      else{await refresh();if(!["review","uncertain","saving","recovering","saved","copy","partial","reconnect","paused","cancelled","system-hold"].includes(state)){
         finishedAt=Date.now();hint=L("保存尚未完成，读取记录已保留。请在资料库查看处理状态。","Save is not complete. Reading measurements are retained. Check the library for recovery.");
         state="failed";paint();updateHistory();note.textContent=hint;note.hidden=false;}}
     }finally{if(path===route){busy=false;paint();}}

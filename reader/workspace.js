@@ -38,8 +38,9 @@ globalThis.ReaderWorkspace = ({capture,busy}) => {
     }
     for(const a of directory){
       const u=new URL(a.href,location.origin),p=u.origin===location.origin&&ReaderRoutes.projectHome(u.pathname);
-      const name=(a.innerText||a.textContent||"").trim()||a.getAttribute("aria-label")?.trim()||a.title?.trim(),group="project:"+p;
-      if(!p||!name||name===p)continue;
+      if(!p)continue;
+      const name=[a.innerText||a.textContent,a.getAttribute("aria-label"),a.title].map(value=>ReaderRoutes.projectName(value,p)).find(Boolean),group="project:"+p;
+      if(!name)continue;
       if(!Object.hasOwn(groups,group))groups[group]=name;
       else if(groups[group]!==name)groups[group]=null;
     }

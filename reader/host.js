@@ -8,9 +8,22 @@ async function api(device,path,opts={}){
   try{r=await fetch(READER_ORIGIN+"/api/extension/v1/"+path,{...opts,credentials:"omit",redirect:"error",cache:"no-store",
     headers:{...opts.headers,Authorization:"Bearer "+token}});}
   catch(e){if(e.name==="TypeError")e.code="NETWORK_UNAVAILABLE";throw e;}
+  if(await rpc("device")!==device)throw Error("Reader account changed.");
   if(!r.ok){const e=Error("Reader HTTP "+r.status);e.status=r.status;
+    const after=r.headers.get("Retry-After");
+    if(after){const at=/^\d+$/.test(after)?Date.now()+Number(after)*1000:Date.parse(after);
+      if(Number.isSafeInteger(at))e.retryAt=at;}
     try{const {detail}=await r.json();e.code=ReaderProgress.diagnostic({category:"unknown",code:detail?.code})?.code;}catch{}
-    throw e;}return r;
+    throw e;}
+  // Validate the actual server boundary, including requests made by the
+  // resumable uploader after a lost chunk/finish response.
+  if(path.startsWith("requests/")){
+    const value=await r.clone().json().catch(()=>null);
+    if(!value||!Object.hasOwn(value,"id")||value.id!==null&&!uuid(value.id))
+      throw Object.assign(Error("Invalid request receipt"),{code:"UPLOAD_RECEIPT_INVALID"});
+  }
+  if(await rpc("device")!==device)throw Error("Reader account changed.");
+  return r;
 }
 async function ledger(key,patch,owner){
   await navigator.locks.request("reader-jobs",async()=>{
@@ -18,6 +31,7 @@ async function ledger(key,patch,owner){
     // A delayed progress flush cannot recreate a discarded job or cross accounts.
     if(owner&&(!job||job.device!==owner||await rpc("device")!==owner))return;
     patch={...patch};
+    if(patch.phase&&job?.nextCheckAt&&!Object.hasOwn(patch,"nextCheckAt"))patch.nextCheckAt=null;
     if(patch.step)patch.step=ReaderProgress.snapshot(patch.step);
     const stats=ReaderProgress.accumulate(ReaderProgress.accumulate(job?.stats,patch.stats),patch.step);
     if("percent" in patch)Object.assign(stats,ReaderProgress.accumulate(stats,{serverProgress:patch.percent}));
@@ -30,7 +44,7 @@ async function ledger(key,patch,owner){
     else if(patch.active===false)patch.finishedAt=Number.isSafeInteger(job?.finishedAt)?job.finishedAt:Date.now();
     if(job)Object.assign(job,patch);else jobs.push({key,...patch});
     const batch=await rpc("batch");
-    const keep=j=>j.active||j.packageReady||j.phase==="review"||j.phase==="upload-unknown"||!!batch?.id&&j.batch===batch.id;
+    const keep=j=>j.active||j.packageReady||ReaderProgress.scheduledCheck(j)||j.phase==="review"||j.phase==="upload-unknown"||!!batch?.id&&j.batch===batch.id;
     const done=jobs.filter(j=>!keep(j)).slice(-12);
     await rpc("saveJobs",{jobs:jobs.filter(j=>keep(j)||done.includes(j))});
   });
@@ -80,14 +94,16 @@ function displayProgress(key,device,port,initial){
 async function deliver(job,file,report){
   report.update({stage:"upload",packageBytes:file.size});
   await report.flush();
-  await ledger(job.key,{phase:"uploading",active:true,diagnostic:null});
+  await ledger(job.key,{phase:"uploading",active:true,diagnostic:null},job.device);
   const res=await ReaderUpload({key:job.key,file,binding:job.binding,request:(p,opts)=>api(job.device,p,opts),report:report.update,retryLimit:2,
     onRetry:()=>ledger(job.key,{diagnostic:{category:"network",stage:"upload",code:"NETWORK_UNAVAILABLE",recovery:"retry_existing"}},job.device)});
   if(!uuid(res.id))throw Object.assign(Error("Unconfirmed upload receipt"),{code:"UPLOAD_RECEIPT_UNCONFIRMED"});
   await report.flush();
+  if(await rpc("device")!==job.device)return;
   await ledger(job.key,{iid:res.id,packageReady:false,binding:null,stats:{uploadBytes:file.size},diagnostic:null,
     phase:job.mode==="append"?"append-ready":"received",active:job.mode!=="append",
-    ...(job.mode==="append"?{settledAt:Date.now()}:{})});
+    ...(job.mode==="append"?{settledAt:Date.now()}:{})},job.device);
+  if(await rpc("device")!==job.device)return;
   await erase(job.key);
 }
 function uploadFailure(e){
@@ -107,36 +123,54 @@ function failureDiagnostic(e,stage){
     e.status>=500||e.status===429?"server":"unknown";
   return ReaderProgress.diagnostic({category,stage,status:e.status,code:e.code});
 }
+// These durable attempts are for an already authorized handoff. The existing
+// upload protocol reconciles its key/offset on every attempt. A content review,
+// invalid receipt, ownership change or user cancellation never starts a retry.
+const checkDelays=[5000,30000];
+function nextCheck(job,error){
+  const used=job.autoChecks??0;
+  if(!Number.isInteger(used)||used<0||used>=checkDelays.length)return {nextCheckAt:null};
+  if(error?.code&&error.code!=="NETWORK_UNAVAILABLE")return {nextCheckAt:null};
+  if(error&&(error.status!=null?![408,429,500,502,503,504].includes(error.status):error.code!=="NETWORK_UNAVAILABLE"))return {nextCheckAt:null};
+  return {nextCheckAt:Math.max(Date.now()+checkDelays[used],error?.retryAt||0)};
+}
 // Called only while the per-item OPFS/operation lock is held.
 async function advance(job,decision,resume=false,retry=false){
+  const record=patch=>ledger(job.key,patch,job.device);
   try{
     if(await rpc("device")!==job.device)return;
     if(job.packageReady){
       const previous=await (await api(job.device,"requests/"+job.key)).json();
-      if(uuid(previous.id)){await ledger(job.key,{iid:previous.id,packageReady:false,binding:null,
+      if(!previous||!Object.hasOwn(previous,"id")||previous.id!==null&&!uuid(previous.id))throw Object.assign(Error("Invalid receipt"),{code:"UPLOAD_RECEIPT_INVALID"});
+      if(await rpc("device")!==job.device)return;
+      if(uuid(previous.id)){await record({iid:previous.id,packageReady:false,binding:null,
         stats:{uploadBytes:job.binding?.size},diagnostic:null,active:job.mode!=="append",
-        phase:job.mode==="append"?"append-ready":"received"});await erase(job.key);return;}
-      if(!resume){await ledger(job.key,{phase:"upload-paused",active:false});return;}
+        phase:job.mode==="append"?"append-ready":"received"});if(await rpc("device")===job.device)await erase(job.key);return;}
+      if(!resume){await record({phase:"upload-paused",active:false,...(job.active&&job.phase==="uploading"?nextCheck(job):{})});return;}
       const report=displayProgress(job.key,job.device,null,job.stats);
       try{await initialized;const dir=await (await root).getDirectoryHandle(job.key);
         const file=await (await dir.getFileHandle("import.zip")).getFile();
         await deliver(job,file,report);}
-      catch(e){try{await report.close();}catch(problem){e=problem;}await ledger(job.key,{phase:e.name==="NotFoundError"?"capture-interrupted":uploadFailure(e),active:false,
-        diagnostic:failureDiagnostic(e,"upload"),
+      catch(e){try{await report.close();}catch(problem){e=problem;}await record({phase:e.name==="NotFoundError"?"capture-interrupted":uploadFailure(e),active:false,
+        diagnostic:failureDiagnostic(e,"upload"),...nextCheck(job,e),
         ...(e.name==="NotFoundError"?{packageReady:false,binding:null}:{})});}
       finally{await report.close().catch(()=>{});}return;
     }
     if(job.phase==="reading"&&!live.has(job.key)){
-      await ledger(job.key,{phase:"capture-interrupted",active:false,
+      await record({phase:"capture-interrupted",active:false,
         diagnostic:job.diagnostic||{category:"source",stage:ReaderProgress.snapshot(job.step)?.stage||"source",code:"CAPTURE_INTERRUPTED"}});return;
     }
     let iid=job.iid;
     if(!iid){
-      const result=await (await api(job.device,"requests/"+job.key)).json();iid=result.id;
-      if(!iid){await ledger(job.key,{phase:"upload-unknown",active:false});return;}
-      await ledger(job.key,{iid});
+      const result=await (await api(job.device,"requests/"+job.key)).json();
+      if(!result||!Object.hasOwn(result,"id")||result.id!==null&&!uuid(result.id))throw Object.assign(Error("Invalid receipt"),{code:"UPLOAD_RECEIPT_INVALID"});
+      iid=result.id;
+      if(iid==null){await record({phase:"upload-unknown",active:false,...nextCheck(job)});return;}
+      if(!uuid(iid))throw Object.assign(Error("Invalid receipt"),{code:"UPLOAD_RECEIPT_INVALID"});
+      await record({iid});
     }
     let s=await (await api(job.device,"imports/"+iid)).json();
+    if(await rpc("device")!==job.device)return;
     if(retry&&job.mode!=="append"&&s.mode!=="selective_append"&&["failed","paused"].includes(s.status)){
       const caps=await (await api(job.device,"capabilities")).json();
       if(!caps.import_retry)throw Error("Reader does not support retrying this import.");
@@ -147,30 +181,43 @@ async function advance(job,decision,resume=false,retry=false){
       // A device only delivers an excerpt. It can never confirm the destination,
       // consent to a live share, or invoke the ordinary full-import commit.
       if(job.mode!=="append"||s.mode!=="selective_append"||!uuid(iid))throw Error("Source receipt mismatch");
-      await ledger(job.key,{iid,...ReaderProgress.appendReceipt(s),review:null});return;
+      await record({iid,...ReaderProgress.appendReceipt(s),review:null});return;
     }
     if(s.review){
       if(!decision&&(s.review.partial||s.review.live_share||s.review.action==="conflict")){
-        await ledger(job.key,{phase:"review",active:false,review:s.review,diagnostic:null});return;
+        await record({phase:"review",active:false,review:s.review,diagnostic:null});return;
       }
-      if(decision&&decision.receipt!==s.review.receipt){await ledger(job.key,{phase:"review",active:false,review:s.review,diagnostic:null});return;}
+      if(decision&&decision.receipt!==s.review.receipt){await record({phase:"review",active:false,review:s.review,diagnostic:null});return;}
       await api(job.device,`imports/${iid}/commit`,typed("POST",decision||{receipt:s.review.receipt}));
-      await ledger(job.key,{phase:"queued",active:true,review:null,diagnostic:null});return;
+      await record({phase:"queued",active:true,review:null,diagnostic:null});return;
     }
-    await ledger(job.key,ReaderTransferState(s));
-  }catch(e){await ledger(job.key,{phase:e.status===401||e.status===403?"reconnect":"check",active:false,
-    diagnostic:failureDiagnostic(e,job.packageReady?"upload":"server")});}
+    await record(ReaderTransferState(s));
+  }catch(e){await record({phase:e.status===401||e.status===403?"reconnect":"check",active:false,
+    diagnostic:failureDiagnostic(e,job.packageReady?"upload":"server"),...nextCheck(job,e)});}
 }
-async function progress(snapshot,decision,resume=false,retry=false){
+async function progress(snapshot,decision,resume=false,retry=false,background=false){
   await initialized;
   return navigator.locks.request("reader-local-"+snapshot.key,{ifAvailable:!resume},async lock=>{
     if(!lock||await rpc("device")!==snapshot.device)return;
     const job=(await rpc("jobs")).find(j=>j.key===snapshot.key&&j.device===snapshot.device);
     if(!job||job.phase==="cancelled"||live.has(job.key))return;
+    if(background&&!job.active){
+      if(!ReaderProgress.scheduledCheck(job)||job.nextCheckAt>Date.now())return;
+      const used=job.autoChecks??0;
+      if(!Number.isInteger(used)||used<0||used>=checkDelays.length){await ledger(job.key,{nextCheckAt:null},job.device);return;}
+      job.autoChecks=used+1;
+      // Reserve the attempt inside the per-item lock before any network I/O.
+      // On host restart the next bounded attempt can still pick up a lost reply.
+      await ledger(job.key,{autoChecks:job.autoChecks,...nextCheck(job)},job.device);
+      resume=!!job.packageReady;
+    }
     return advance(job,decision,resume,retry);
   });
 }
-async function tick(){for(const j of await rpc("jobs"))if(j.active&&!live.has(j.key))await progress(j);}
+async function tick(){
+  for(const j of await rpc("jobs"))if(!live.has(j.key)&&(j.active||ReaderProgress.scheduledCheck(j)&&j.nextCheckAt<=Date.now()))
+    await progress(j,undefined,false,false,true);
+}
 setInterval(()=>tick().catch(()=>{}),2500);
 chrome.runtime.onConnect.addListener(port=>{
   if(!port.name.startsWith("reader:")||!uuid(port.name.slice(7)))return;
@@ -252,7 +299,7 @@ chrome.runtime.onConnect.addListener(port=>{
         try{
           await deliver(job,zip,report);
         }catch(e){try{await report.close();}catch(problem){e=problem;}
-          await ledger(key,{phase:uploadFailure(e),active:false,diagnostic:failureDiagnostic(e,"upload")});throw e;}
+          await ledger(key,{phase:uploadFailure(e),active:false,diagnostic:failureDiagnostic(e,"upload"),...nextCheck(job,e)},t.device);throw e;}
         finally{live.delete(key);}
         finished=true;await report.close();
       }else throw Error("Invalid transfer sequence");

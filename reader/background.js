@@ -69,13 +69,14 @@ chrome.runtime.onMessage.addListener((m,s,reply)=>{
       await host();return {ok:true};})().then(reply,()=>reply({error:"Background unavailable"}));return true;
   }
 });
-chrome.alarms.onAlarm.addListener(async a=>{
-  if(a.name==="reader-pending"&&(await chrome.storage.local.get("jobs")).jobs?.some(j=>j.active)){
+async function wakePending(){
+  if((await chrome.storage.local.get("jobs")).jobs?.some(j=>j.active||ReaderProgress.scheduledCheck(j)&&j.nextCheckAt<=Date.now())){
     await host();await chrome.runtime.sendMessage({kind:"tick"}).catch(()=>{});
   }
-});
+}
+chrome.alarms.onAlarm.addListener(a=>{if(a.name==="reader-pending")return wakePending();});
 const resumePending=async()=>{await ReaderClient.trust;await chrome.alarms.create("reader-pending",{periodInMinutes:1});
-  if((await chrome.storage.local.get("jobs")).jobs?.some(j=>j.active)){await host();await chrome.runtime.sendMessage({kind:"tick"}).catch(()=>{});}};
+  await wakePending();};
 chrome.runtime.onInstalled.addListener(()=>resumePending().catch(()=>{}));
 chrome.runtime.onStartup.addListener(()=>resumePending().catch(()=>{}));
 chrome.storage.onChanged.addListener((changes,area)=>{

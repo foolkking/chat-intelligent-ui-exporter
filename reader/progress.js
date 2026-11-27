@@ -62,6 +62,16 @@ globalThis.ReaderProgress = (() => {
       recovery: known && recoveries.has(value.recovery) ? value.recovery : "system_support"});
   }
   // A source port cannot declare a server failure, resumable upload, or arbitrary diagnostic text.
+  const sourceReasons={SOURCE_FORMAT_INVALID:["来源格式无法识别","Unrecognized source format"],SOURCE_PAGE_INVALID:["分页信息无效","Invalid history page"],
+    SOURCE_PAGE_CHANGED:["重叠分页记录不一致","Overlapping history records differ"],SOURCE_BRANCH_UNVERIFIED:["无法确认当前分支","Branch not verified"],
+    SOURCE_ATTACHMENT_FAILED:["附件读取失败","File read failed"],SOURCE_HTTP_FAILED:["来源请求失败","Source request failed"],NETWORK_UNAVAILABLE:["网络中断","Network interrupted"]};
+  function sourceReason(code,zh){
+    return Object.hasOwn(sourceReasons,code)?sourceReasons[code][zh?0:1]:"";
+  }
+  function scheduledCheck(job){
+    if(job?.active||!["check","upload-paused","upload-unknown"].includes(job?.phase))return false;
+    return Number.isSafeInteger(job.nextCheckAt)&&job.nextCheckAt>0;
+  }
   function sourceDiagnostic(error,stage="source"){
     const code=error?.name==="AbortError"?"CAPTURE_CANCELLED":sourceCodes.has(error?.code)?error.code:"SOURCE_READ_FAILED";
     const status=code==="SOURCE_HTTP_FAILED"?error?.status:undefined;
@@ -154,5 +164,5 @@ globalThis.ReaderProgress = (() => {
       flush, close() { clearTimeout(timer); pending = timer = null; }
     };
   }
-  return {snapshot, describe, throttle, accumulate, diagnostic, sourceDiagnostic, failure, appendReceipt};
+  return {snapshot, describe, throttle, accumulate, diagnostic, sourceDiagnostic, sourceReason, scheduledCheck, failure, appendReceipt};
 })();

@@ -6,6 +6,7 @@ function policyText(p){
     L("可含个人批注和笔记","May include personal notes")].join(" · ");
 }
 function jobLabel(j){
+  if(ReaderProgress.scheduledCheck(j))return L("等待自动核对收据","Receipt check scheduled");
   if(j.active&&["reading","uploading"].includes(j.phase)&&j.step)return ReaderProgress.describe(j.step,zh);
   const r=j.result;
   if(j.mode==="append"&&j.phase==="append-ready")return L("所选消息已接收 · 等待确认追加","Selected messages received · review append");
@@ -35,7 +36,7 @@ function jobLabel(j){
     "result-unavailable":L("已处理，原对话不可用","Processed · conversation unavailable"),check:L("状态待核对","Status unconfirmed")}[j.phase]||L("等待处理","Pending");
 }
 function incomplete(j){return j.result?.completeness==="partial"||j.partial||Object.values(j.losses||{}).some(Number);}
-function warn(j){return incomplete(j)||!!j.review||!j.active&&!["done","cancelled","append-ready","append-complete"].includes(j.phase);}
+function warn(j){return incomplete(j)||!!j.review||!j.active&&!ReaderProgress.scheduledCheck(j)&&!["done","cancelled","append-ready","append-complete"].includes(j.phase);}
 const mustResolve=j=>j.active||j.packageReady||!!j.review||["check","reconnect","upload-unknown"].includes(j.phase);
 function boxFor(copy,iconName,warning,key){
   const box=node("details","job"),sum=node("summary"),body=node("div","job-body");box.dataset.key=key;box.dataset.tone=warning?"warning":"plain";
@@ -61,8 +62,8 @@ function taskBox(j){
   }
   if(j.packageReady&&!j.active){
     body.append(node("p","",L("原导入包保留在本机；继续时先核对收据，不重复读取或新建对话。","The package is retained locally. Resume checks its receipt first; it does not recapture or create another conversation.")));
-    body.append(btn(L("继续上传","Resume upload"),()=>cmd({op:"check",key:j.key})),
-      btn(L("取消未接收的上传","Cancel unreceived upload"),()=>cmd({op:"discard",key:j.key})));
+    if(!ReaderProgress.scheduledCheck(j))body.append(btn(L("继续上传","Resume upload"),()=>cmd({op:"check",key:j.key})));
+    body.append(btn(L("取消未接收的上传","Cancel unreceived upload"),()=>cmd({op:"discard",key:j.key})));
   }else
   if(j.mode==="append"&&uuid(j.iid)&&["append-ready","append-attention","append-complete"].includes(j.phase)){
     body.append(btn(j.phase==="append-complete"?L("查看追加结果","View append result"):L("在 Reader 核对","Review in Reader"),async()=>{
@@ -95,7 +96,7 @@ function taskBox(j){
       j.phase==="capture-limit"?L("这是旧版插件留下的失败记录，内容未发送。更新 Reader 和插件后，可回原对话重新保存。","This is a previous extension failure; no content was sent. Update Reader and the extension, then save again from the conversation."):
       L("没有保存此版本。请核对来源和目标后，从原对话重试。","This version was not saved. Check the source and destination before retrying.")));
   }else if(j.phase==="reconnect"){body.append(btn(L("打开设置","Open settings"),()=>{if(!$("settings").open)settings($("settings-label"));}));}
-  else if(!j.active&&!["cancelled","result-unavailable"].includes(j.phase)){
+  else if(!j.active&&!ReaderProgress.scheduledCheck(j)&&!["cancelled","result-unavailable"].includes(j.phase)){
     const recovery=ReaderProgress.diagnostic(j.diagnostic)?.recovery;
     if(recovery==="retry_existing"&&caps.import_retry&&j.mode!=="append")
       body.append(btn(L("继续原导入","Resume original import"),()=>cmd({op:"retry",key:j.key})));

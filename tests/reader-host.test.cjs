@@ -79,6 +79,75 @@ async function environment({accepted=false,initialPatch={},beforeRequest,onLock}
     }};
 }
 
+test("a lost response is reconciled automatically from the original receipt without a second upload",async()=>{
+  let lookups=0;
+  const e=await environment({beforeRequest(route){
+    if(route==="requests/"+key){
+      if(++lookups===1)return Response.json({}, {status:503});
+      return Response.json({id:iid});
+    }
+  }});
+  await e.tick();
+  assert.ok(e.jobs()[0].nextCheckAt>Date.now());await e.tick();assert.equal(lookups,1);
+  e.patchJob({nextCheckAt:Date.now()-1});await Promise.all([e.tick(),e.tick()]);
+  assert.equal(e.jobs()[0].iid,iid);assert.equal(e.jobs()[0].phase,"received");
+  assert.equal(lookups,2);assert.equal(e.requests.filter(r=>r.method==="POST").length,0);
+});
+test("a confirmed sealed upload resumes from its durable offset; shared failures have a finite retry budget",async()=>{
+  const e=await environment();
+  await e.tick();assert.equal(e.jobs()[0].phase,"upload-paused");assert.ok(e.jobs()[0].nextCheckAt>Date.now());
+  e.patchJob({nextCheckAt:Date.now()-1});await e.tick();
+  assert.equal(e.jobs()[0].iid,iid);assert.equal(e.calls.filter(p=>p.endsWith("/finish")).length,1);
+  const outage=await environment({beforeRequest(){return new Response(null,{status:503,headers:{"Retry-After":"120"}});}});
+  await outage.tick();assert.ok(outage.jobs()[0].nextCheckAt>=Date.now()+119000);
+  for(let i=0;i<2;i++){outage.patchJob({nextCheckAt:Date.now()-1});await outage.tick();}
+  assert.equal(outage.jobs()[0].autoChecks,2);assert.equal(outage.jobs()[0].nextCheckAt,null);
+  await outage.tick();assert.equal(outage.calls.length,3);assert.ok(outage.jobs()[0].packageReady);
+});
+test("permanent errors and explicit decisions never schedule background submissions",async()=>{
+  for(const status of [401,403,409,413,422,507]){
+    const e=await environment({beforeRequest(){return new Response(null,{status});}});
+    await e.tick();await e.tick();assert.ok(!e.jobs()[0].nextCheckAt);assert.equal(e.calls.length,1);
+  }
+  const e=await environment({initialPatch:{packageReady:false,iid,phase:"received"},beforeRequest(){
+    return Response.json({status:"ready",review:{action:"conflict",receipt:"synthetic-receipt"}});
+  }});
+  await e.tick();await e.tick();assert.equal(e.jobs()[0].phase,"review");assert.ok(!e.jobs()[0].nextCheckAt);
+  assert.ok(e.requests.every(r=>r.method==="GET"));
+});
+test("an incomplete receipt response cannot authorize a new submission",async()=>{
+  for(const response of [{},{id:"invalid"},null]){
+    const e=await environment({initialPatch:{active:false,phase:"upload-paused"},beforeRequest(){return Response.json(response);}});
+    await e.resume();
+    assert.equal(e.requests.length,1);assert.ok(e.requests.every(r=>r.method==="GET"));
+    assert.equal(e.jobs()[0].diagnostic.code,"UPLOAD_RECEIPT_INVALID");
+    assert.ok(!e.jobs()[0].nextCheckAt);assert.ok(e.directories.has(key));
+  }
+});
+test("a delayed accepted receipt after switching owners cannot erase retained bytes",async()=>{
+  const e=await environment({beforeRequest(route,opts,state){
+    if(route==="requests/"+key){state.setDevice("replacement-owner");return Response.json({id:iid});}
+  }});
+  await e.tick();assert.ok(e.directories.has(key));assert.equal(e.requests.length,1);
+  assert.equal(e.jobs()[0].iid,undefined);
+});
+test("scheduled recovery rechecks cancellation under the OPFS lock and stops malformed budgets",async()=>{
+  let cancel=false;
+  const e=await environment({initialPatch:{phase:"upload-paused",active:false,nextCheckAt:Date.now()-1},
+    onLock(name,state){if(cancel&&name==="reader-local-"+key){cancel=false;state.patchJob({phase:"cancelled",nextCheckAt:null,packageReady:false});}}});
+  cancel=true;await e.tick();assert.deepEqual(e.calls,[]);assert.equal(e.jobs()[0].phase,"cancelled");
+  for(const count of [-1,2,"1",2.5]){
+    const held=await environment({initialPatch:{phase:"check",active:false,nextCheckAt:Date.now()-1,autoChecks:count}});
+    await held.tick();assert.deepEqual(held.calls,[]);assert.equal(held.jobs()[0].nextCheckAt,null);
+    assert.ok(held.directories.has(key));
+  }
+});
+test("a transient HTTP status carrying a semantic error never retries the same invalid artifact",async()=>{
+  const e=await environment({beforeRequest(){return Response.json({detail:{code:"READER_PACKAGE_INVALID"}},{status:503});}});
+  await e.tick();await e.tick();
+  assert.equal(e.calls.length,1);assert.ok(!e.jobs()[0].nextCheckAt);
+  assert.equal(e.jobs()[0].diagnostic.recovery,"system_support");
+});
 test("host restart keeps a sealed package but deletes unfinished capture; it queries before an explicit resume",async()=>{
   const e=await environment();
   assert.ok(e.directories.has(key));assert.ok(!e.directories.has(orphan));

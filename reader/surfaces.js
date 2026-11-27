@@ -39,7 +39,7 @@ chrome.action.onClicked.addListener(async tab => {
 });
 chrome.runtime.onMessage.addListener((m,s,reply)=>{
   const key = m?.kind;
-  if (!["frame-ticket","frame-claim","frame-close","frame-view","panel-allowed","open-center","surface-tab"].includes(key)) return;
+  if (!["frame-ticket","frame-claim","frame-close","frame-view","panel-allowed","open-center","surface-tab","launcher-position"].includes(key)) return;
   (async()=>{
     await ReaderClient.trust;
     if (key==="panel-allowed") {
@@ -73,6 +73,16 @@ chrome.runtime.onMessage.addListener((m,s,reply)=>{
     if(!source(s)||!ReaderRoutes.eligible(m.path||""))return {};
     const owner={tab:s.tab.id,doc:s.documentId,path:m.path,expires:Date.now()+20000};
     if(!s.tab.active||!await liveParent(owner))return {};
+    if(key==="launcher-position"){
+      const valid=p=>p&&[p.x,p.y].every(n=>Number.isFinite(n)&&n>=0&&n<=1);
+      if(Object.hasOwn(m,"position")){
+        if(!valid(m.position))return {};
+        const position={x:m.position.x,y:m.position.y};
+        await chrome.storage.local.set({launcherPosition:position});return {position};
+      }
+      const p=(await chrome.storage.local.get("launcherPosition")).launcherPosition;
+      return {position:valid(p)?{x:p.x,y:p.y}:null};
+    }
     if(key==="frame-ticket"){
       // Omitted view keeps the original library caller compatible; explicit invalid values fail closed.
       owner.view=m.view===undefined?"library":m.view;if(!privateView(owner.view))return {};

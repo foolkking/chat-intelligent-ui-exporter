@@ -47,6 +47,16 @@ function fixture({batch=false,sidePanel=true}={}){
     hold:gate=>{hold=gate;},discovery:response=>{discovery=response;},sideError:()=>{sideError=true;},removed:tab=>removed(tab),
     beforeRequest:fn=>{beforeRequest=fn;},afterSet:fn=>{afterSet=fn;}};
 }
+test("launcher preference stores only bounded coordinates for the live source document",async()=>{
+  const f=fixture(),request=(position,sender=f.top)=>f.send({kind:"launcher-position",path:"/c/synthetic",
+    ...(position===undefined?{}:{position})},sender);
+  assert.deepEqual(json(await request({x:0.2,y:0.7,extra:"discard"})),{position:{x:0.2,y:0.7}});
+  assert.deepEqual(json(await request()),{position:{x:0.2,y:0.7}});
+  for(const p of [{x:1.01,y:0},{x:-1,y:1},{x:"0.5",y:0},{x:NaN,y:0},null])await request(p);
+  await request({x:1,y:1},f.child());await request({x:0,y:0},{...f.top,documentId:"stale"});
+  assert.deepEqual(json(f.local),{launcherPosition:{x:0.2,y:0.7}});
+  assert.equal(f.calls.some(c=>c.startsWith("host")||c==="capabilities"),false);
+});
 test("source open-center requests import on that exact live document with no new tab or private reply",async()=>{
   const f=fixture();assert.deepEqual(json(await f.send({kind:"open-center",path:"/c/synthetic"})),{ok:true});
   assert.deepEqual(f.created,[]);assert.deepEqual(json(f.sent.at(-1)),{tab:1,message:{kind:"reader-open-import"},options:{documentId:"source-doc"}});

@@ -19,10 +19,14 @@ globalThis.ReaderSourceControl=({pathId,capture,cancel})=>{
     .read-progress .progress-elapsed{margin-top:8px}.read-progress .diagnostic{min-height:44px;padding:4px 0;color:var(--accent);font-size:12px}
     :host:has(.read-progress:not([hidden])) .bar{border-radius:0 0 10px 10px}
     :host([data-workspace]:not([data-docked])) .read-progress{display:none}:host([data-workspace]:not([data-docked])) .bar{border-radius:10px}
+    :host([data-launcher-position]:not([data-docked])){inset:var(--launcher-y) auto auto var(--launcher-x)}
+    :host([data-launcher-position]:not([data-docked])) .menu{max-height:var(--launcher-menu-height);min-width:min(200px,var(--launcher-menu-width));max-width:var(--launcher-menu-width)}
+    :host([data-launcher-position][data-menu-below]:not([data-docked])) .menu{top:calc(100% + 4px);bottom:auto}
+    :host([data-launcher-position][data-menu-left]:not([data-docked])) .menu{left:0;right:auto}
     :host([data-docked]){position:relative;inset:auto;display:block;width:100%;z-index:auto}
     :host([data-docked]) .bar{border:0;border-radius:0;max-width:100%;background:transparent}
     :host([data-docked]) .read-progress{width:100%;max-width:100%;max-height:min(46dvh,370px);border:0;border-radius:0;border-bottom:1px solid var(--rule)}
-    :host([data-docked]) .main{border-radius:6px}.open-workspace{width:44px;display:grid;place-items:center;border-right:1px solid var(--rule)}
+    :host([data-docked]) .main{border-radius:6px}.open-workspace{width:44px;display:grid;place-items:center;border-right:1px solid var(--rule);touch-action:none;user-select:none;cursor:grab}.open-workspace:active{cursor:grabbing}
     .main small{font-weight:400;font-size:12px;max-width:12ch;color:var(--soft)}.bar[data-project=true] .main{border-radius:9px}svg{width:16px;height:16px;flex:none}.main svg{color:var(--accent)}.bar[data-tone=warning] .main svg{color:var(--warn)}
     .toggle{width:44px;flex:none;border-radius:0 9px 9px 0;display:grid;place-items:center;color:var(--soft)}.toggle svg{width:12px}
     .menu{display:grid;position:absolute;right:0;bottom:calc(100% + 4px);padding:4px;background:var(--paper);border:1px solid var(--rule);color:var(--ink);border-radius:8px;min-width:min(200px,90vw);max-width:calc(100vw - 26px);max-height:var(--reader-menu-room,65dvh);overflow:auto;overscroll-behavior:contain}
@@ -30,6 +34,7 @@ globalThis.ReaderSourceControl=({pathId,capture,cancel})=>{
   const make=(tag,cls)=>{const n=document.createElement(tag);n.className=cls;return n;},bar=make("div","bar"),main=make("button","main"),toggle=make("button","toggle"),menu=make("div","menu"),openWorkspace=make("button","open-workspace");
   openWorkspace.type="button";openWorkspace.textContent="☰";openWorkspace.setAttribute("aria-label",L("打开 Chat Reader 工作区","Open Chat Reader workspace"));
   openWorkspace.onclick=e=>{if(e.isTrusted)globalThis.ReaderOpenWorkspace?.("outline");};
+  const placeLauncher=globalThis.ReaderLauncher?.(openWorkspace,host);
   globalThis.ReaderFocusWorkspace=()=>{if(!host.isConnected||openWorkspace.hidden)return false;openWorkspace.focus({preventScroll:true});return true;};
   main.type=toggle.type="button";menu.hidden=true;toggle.append(g("chevron"));toggle.title=L("其他操作","Other actions");toggle.setAttribute("aria-label",toggle.title);toggle.setAttribute("aria-expanded","false");
   const progressBox=make("div","read-progress"),progressText=make("p",""),meter=make("progress",""),phaseLive=make("span","");
@@ -100,6 +105,7 @@ globalThis.ReaderSourceControl=({pathId,capture,cancel})=>{
     const isDocked=target!==document.body;
     host.toggleAttribute("data-docked",isDocked);openWorkspace.hidden=isDocked;
     if(host.parentNode!==target)target.append(host);
+    placeLauncher?.();
   }
   surface?.subscribe(()=>{place();});
   function paint(){

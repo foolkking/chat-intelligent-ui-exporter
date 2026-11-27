@@ -19,7 +19,7 @@ globalThis.ReaderSourceFile = (() => {
     };
   }
   // Yield object fields or array items. Delimiters in escaped strings or nested containers never split a value.
-  async function* entries(file, begin, end, object, check = ()=>{}) {
+  async function* entries(file, begin, end, object, check = ()=>{}, checkpoint) {
     const get=fileReader(file), open=object?123:91, close=object?125:93;
     let pos=begin,state="open",a=0,key=null,quoted=false,escape=false,bom=0;
     const stack=[];
@@ -28,6 +28,9 @@ globalThis.ReaderSourceFile = (() => {
       for (;;) {
         check();const {done,value}=await stream.read();if(done)break;
         for(let i=0;i<value.length;i++,pos++) {
+          if(checkpoint && (i & 16383)===0){
+            const pause=checkpoint(pos-begin,end-begin);if(pause)await pause;
+          }
           const b=value[i];
           if(bom){if(b!==(bom===1?187:191))invalid();bom=bom===1?2:0;continue;}
           if(begin===0&&pos===0&&b===239){bom=1;continue;}
@@ -67,11 +70,11 @@ globalThis.ReaderSourceFile = (() => {
       if(state!=="done")invalid();
     }finally{await stream.cancel().catch(()=>{});stream.releaseLock();}
   }
-  async function header(file,check,projectNames=false) {
+  async function header(file,check,projectNames=false,checkpoint) {
     const fields=new Map(),get=fileReader(file);
     const wanted=new Set(["id","conversation_id","project_id","title","update_time","mapping","messages","current_node","page_info"]);
     if(projectNames){wanted.add("project_name");wanted.add("project_title");}
-    for await(const f of entries(file,0,file.size,true,check)) {
+    for await(const f of entries(file,0,file.size,true,check,checkpoint)) {
       if(!wanted.has(f.key))continue;
       if(fields.has(f.key))invalid();
       if((f.key==="project_name"||f.key==="project_title")&&f.end-f.start>8192){fields.set(f.key,null);continue;}
@@ -80,10 +83,10 @@ globalThis.ReaderSourceFile = (() => {
     return Object.fromEntries(fields);
   }
   const valid=id=>typeof id==="string"&&/^[\w-]{1,128}$/.test(id);
-  async function tree(file,h,leaf,check,report) {
+  async function tree(file,h,leaf,check,report,checkpoint) {
     const range=h.mapping;if(!range)invalid();
     const nodes=new Map(),get=fileReader(file);let candidate,ambiguous=false;
-    for await(const f of entries(file,range.start,range.end,true,check)) {
+    for await(const f of entries(file,range.start,range.end,true,check,checkpoint)) {
       if(!valid(f.key)||nodes.has(f.key))invalid();
       const n=await get(f.start,f.end);
       if(!n || n.parent!=null&&!valid(n.parent) || n.children!=null&&(!Array.isArray(n.children)||!n.children.every(valid)))invalid();
@@ -143,24 +146,25 @@ globalThis.ReaderSourceFile = (() => {
     return {title:h.title||"ChatGPT",branch:last,source:"conversation-tree",ids,identities,rows,row,warnings};
   }
   // The fork owns source selection and requests. These callbacks only consume each authorized response.
-  function conversation(id,leaf,check,report=()=>{}) {
+  function conversation(id,leaf,check,report=()=>{},checkpoint) {
     const keys=new Map(),cache={start:-1,window:new Uint8Array()};let title;
     async function read(response,page) {
       const file=await response.readerFile(page);
       report({stage:"index"});
-      const h=await header(file,check);
+      const headerCheckpoint=checkpoint&&((done,total)=>checkpoint(done,total,page));
+      const h=await header(file,check,false,headerCheckpoint);
       if(h.conversation_id!=null&&h.conversation_id!==id)branchFailure();
       return {file,h};
     }
     return {
-      async tree(response){const {file,h}=await read(response,1);return tree(file,h,leaf,check,report);},
+      async tree(response){const {file,h}=await read(response,1);return tree(file,h,leaf,check,report,checkpoint);},
       async page(response,number){
         const {file,h}=await read(response,number);
-        if(h.mapping&&number===1)return {result:await tree(file,h,leaf,check,report)};
+        if(h.mapping&&number===1)return {result:await tree(file,h,leaf,check,report,checkpoint)};
         if(!h.messages||typeof h.page_info?.has_previous_page!=="boolean")invalid("SOURCE_PAGE_INVALID");
         title||=h.title||"ChatGPT";
         const get=fileReader(file,cache);let ordinal=0;
-        for await(const f of entries(file,h.messages.start,h.messages.end,false,check)){
+        for await(const f of entries(file,h.messages.start,h.messages.end,false,check,checkpoint)){
           const value=await get(f.start,f.end),m=value?.message??value;if(!valid(m?.id))invalid("SOURCE_PAGE_INVALID");
           const row={get,from:f.start,to:f.end,time:m.create_time,id:m.id,page:number,ordinal:ordinal++};
           if(keys.has(m.id)){

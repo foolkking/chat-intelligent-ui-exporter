@@ -29,7 +29,7 @@ function fixture(){
   for(const file of ["extension/locales/en.js","extension/i18n.js","extension/fast-text.js","extension/source-dom.js",
                     "reader/progress.js","reader/visible.js","reader/source-file.js","reader/page-index.js","reader/capture.js"])
     w.eval(fs.readFileSync(path.join(root,file),"utf8"));
-  return {w,long,requests,progress,rawBytes:Buffer.byteLength(raw),read:ctl=>overlay.read(ctl,step=>progress.push(step)),close:()=>w.close()};
+  return {w,long,requests,progress,rawBytes:Buffer.byteLength(raw),read:(ctl,observe)=>overlay.read(ctl,step=>{progress.push(step);observe?.(step);}),close:()=>w.close()};
 }
 
 test("latest capture navigation keeps metadata only, reuses one Blob, and search cancellation does not invalidate later random reads",async()=>{
@@ -74,4 +74,47 @@ test("capture navigation survives ordinary history mounting but refuses changed 
       assert.equal(f.requests.filter(p=>p==="/backend-api/conversation/synthetic-navigation").length,1);
     }finally{f.close();}
   }
+});
+
+test("a stationary source is fully sampled at read boundaries, not once per source span and message",async()=>{
+  const f=fixture();try{
+    const api=f.w.ReaderPageIndex,sample=api.sample;let scans=0;
+    api.sample=(...args)=>{scans++;return sample(...args);};
+    const result=await f.read(new AbortController());
+    assert.equal(result.rows.length,129);assert.equal(result.complete,true);
+    assert.ok(scans>0&&scans<=8,`stationary mounted transcript was scanned ${scans} times`);
+    assert.ok(f.progress.some(p=>p.stage==="index"&&p.done===129));
+    assert.ok(f.progress.some(p=>p.stage==="messages"&&p.done===129),"building the outline is a separate measured phase");
+  }finally{f.close();}
+});
+
+test("the final navigation boundary refuses a last-moment edit or a contradictory mounted role",async()=>{
+  for(const change of ["body","role"]){
+    const f=fixture();let changed=false;
+    try{
+      await assert.rejects(f.read(new AbortController(),step=>{
+        if(step.stage!=="messages"||step.done!==129||changed)return;
+        changed=true;const node=f.w.document.querySelector("[data-message-id]");
+        if(change==="body")node.querySelector("p").textContent="An intervening edit";
+        else node.dataset.messageAuthorRole="assistant";
+      }),/changed|branch/i);
+      assert.equal(changed,true);
+    }finally{f.close();}
+  }
+});
+
+test("a single large source header yields to a queued stop before it builds the outline",async()=>{
+  const f=fixture(),ctl=new AbortController();try{
+    let clock=0,turns=0,stopAt=null;
+    Object.defineProperty(f.w.performance,"now",{value:()=>clock+=12});
+    f.w.scheduler={yield:()=>new Promise(resolve=>f.w.setTimeout(()=>{turns++;resolve();},0))};
+    await assert.rejects(f.read(ctl,step=>{
+      if(step.checkedBytes>0&&!stopAt){
+        assert.equal(step.checkTotal,f.rawBytes);assert.equal(step.pages,1);
+        assert.match(f.w.ReaderProgress.describe(step,true),/核对来源.*KiB.*MiB/);
+        stopAt=step.checkedBytes;f.w.setTimeout(()=>ctl.abort(),0);
+      }
+    }),/abort/i);
+    assert.ok(turns&&stopAt<f.rawBytes);assert.equal(f.progress.some(p=>p.stage==="messages"),false);
+  }finally{f.close();}
 });

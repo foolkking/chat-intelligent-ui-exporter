@@ -16,6 +16,17 @@ test("progress retains the legacy step contract and allowlists explicit cumulati
   assert.deepEqual(bad,{stage:"source",done:3});
 });
 
+test("source-check byte progress is finite, page-local and distinct from node and transferred byte counts",()=>{
+  const step={stage:"index",pages:2,done:64,checkedBytes:16384,checkTotal:1048576};
+  assert.deepEqual(ReaderProgress.snapshot({...step,raw:"private",url:"private"}),step);
+  assert.match(ReaderProgress.describe(step,true),/核对来源.*第 2 页.*16.0 KiB \/ 1.0 MiB.*64/);
+  assert.deepEqual(ReaderProgress.accumulate({},step),{indexedNodes:64});
+  for(const [checkedBytes,checkTotal] of [[-1,3],[4,3],[1,Infinity],[1.5,3],["1",3],[1,Number.MAX_SAFE_INTEGER+1]]){
+    assert.deepEqual(ReaderProgress.snapshot({stage:"index",checkedBytes,checkTotal}),{stage:"index"});
+  }
+  assert.deepEqual(ReaderProgress.snapshot({stage:"messages",checkedBytes:1,checkTotal:3}),{stage:"messages"});
+});
+
 test("accumulation merges explicit counters, never adds resetting page/file done counters",()=>{
   let stats={};
   for(const step of [

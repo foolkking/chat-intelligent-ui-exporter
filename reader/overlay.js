@@ -11,7 +11,8 @@ globalThis.ReaderOverlay = ({read,busy}) => {
     *,*::before{box-sizing:border-box}[hidden]{display:none!important}button,input{font:inherit;color:var(--fg)}
     button{border:0;background:transparent;cursor:pointer;min-height:44px;border-radius:5px}button:hover,button[aria-pressed=true],
     .active{background:var(--sel);color:var(--accent)}:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
-    .handle{width:24px;height:54px;position:absolute;right:0;top:0;background:transparent;display:grid;place-items:center}
+    .handle{width:24px;height:54px;position:absolute;right:0;top:0;background:transparent;display:grid;place-items:center;touch-action:none;user-select:none;cursor:grab}
+    .handle:active{cursor:grabbing}.handle[data-launcher-position]{position:fixed;inset:var(--launcher-y) auto auto var(--launcher-x)}
     .handle:before{content:"";width:7px;height:36px;border-radius:6px 0 0 6px;background:var(--accent);justify-self:end}
     .handle:hover:before,.handle:focus-visible:before{width:12px}.handle:after{content:"";position:absolute;inset:0 -1px 0 -20px}
     .frame{position:absolute;right:8px;top:0;width:min(360px,calc(100vw - 16px));height:min(680px,var(--reader-room,80dvh));
@@ -55,6 +56,7 @@ globalThis.ReaderOverlay = ({read,busy}) => {
   feedback.append(status,cancel,reload);cancel.hidden=reload.hidden=true;
   const heading=make("header"),modes=make("div","modes"),footer=make("div","tools"),saveSlot=make("div","save-slot");
   const handle=button("",()=>toggle(),"handle");handle.title=L("打开 Chat Reader","Open Chat Reader");handle.setAttribute("aria-label",handle.title);
+  const placeLauncher=globalThis.ReaderLauncher?.(handle,handle);
   const close=icon("close",L("收起","Collapse"),()=>hide(true));
   const expand=button("↗",()=>{wide=!wide;frameBox.dataset.wide=String(wide);expand.setAttribute("aria-pressed",String(wide));
     expand.setAttribute("aria-label",wide?L("恢复紧凑宽度","Use compact width"):L("扩大工作区","Expand workspace"));surface?.update({wide});},"icon");
@@ -76,12 +78,13 @@ globalThis.ReaderOverlay = ({read,busy}) => {
   function send(kind,extra={}){return chrome.runtime.sendMessage({kind,path:location.pathname,...extra});}
   function hide(focus=false){routeEpoch++;readCtl?.abort();readCtl=null;stopPreview();stopSearch();stopJump();frameBox.hidden=true;
     surface?.update({open:false,slot:saveSlot});handle.hidden=!!surface?.get().hasControl;
-    handle.setAttribute("aria-expanded","false");if(focus&&!globalThis.ReaderFocusWorkspace?.())handle.focus({preventScroll:true});}
-  surface?.subscribe(s=>{handle.hidden=s.open||s.hasControl;footer.hidden=!s.hasControl;});
+    handle.setAttribute("aria-expanded","false");placeLauncher?.();if(focus&&!globalThis.ReaderFocusWorkspace?.())handle.focus({preventScroll:true});}
+  surface?.subscribe(s=>{handle.hidden=s.open||s.hasControl;footer.hidden=!s.hasControl;placeLauncher?.();});
   function geometry(state=ReaderPageIndex.layout()){
     const {height,edge,top:offset}=state;compact=state.compact;
     const top=Math.max(offset+8,Math.min(offset+height*.08,edge-440));
     host.style.setProperty("--reader-top",top+"px");host.style.setProperty("--reader-room",Math.max(44,edge-top)+"px");
+    placeLauncher?.();
   }
   function listKey(){return find?"find":tab;}
   function switchList(next,search){
@@ -184,7 +187,7 @@ globalThis.ReaderOverlay = ({read,busy}) => {
     stopPreview();stopJump();if(busy()){notice=L("请等待当前保存完成后定位。","Finish the current save before jumping.");paintStatus();return;}
     if(stale||loadedVersion!==ReaderPageIndex.sample()){
       stale=partial=true;notice=L("对话已变化，请重新读取目录后定位。","The conversation changed. Reload the outline before jumping.");paintStatus();return;}
-    stopSearch();const ctl=new AbortController();jumpCtl=ctl;owner?.setAttribute("aria-busy","true");notice=L("正在定位…","Locating…");paintStatus();
+    readCtl?.abort();readCtl=null;stopSearch();const ctl=new AbortController();jumpCtl=ctl;owner?.setAttribute("aria-busy","true");notice=L("正在定位…","Locating…");paintStatus();
     try{let body;
       if(target.query)body=await loadBody(target.id,ctl.signal);
       else if(target.heading!==undefined){try{body=await loadBody(target.id,ctl.signal);}catch{/* A semantic DOM title can still be proved without text fallback. */}}
@@ -266,21 +269,24 @@ globalThis.ReaderOverlay = ({read,busy}) => {
   async function loadRows(){
     if(frameBox.hidden||view!=="outline")return;
     if(busy()){pauseForCapture();return;}
-    readCtl?.abort();stopPreview();stopSearch();stopJump();const ctl=new AbortController();readCtl=ctl;readStep=null;stale=false;
+    readCtl?.abort();stopPreview();stopSearch();stopJump();const ctl=new AbortController();readCtl=ctl;readStep=null;stale=false;notice="";
     searchResult=null;searchHits=[];searchQuery="";searchStopped=false;
-    rows=ReaderPageIndex.domRows().map(ReaderPageIndex.metadata);loadBody=async id=>ReaderPageIndex.domBody(id);
-    loadedVersion=ReaderPageIndex.sample();partial=true;group();render();
     const n=routeEpoch;
+    const progress=ReaderProgress.throttle(step=>{if(readCtl===ctl&&!ctl.signal.aborted&&n===routeEpoch){readStep=step;paintStatus();}},120);
     try{
-      const data=await read(ctl,step=>{if(!ctl.signal.aborted&&n===routeEpoch){readStep=ReaderProgress.snapshot(step);paintStatus();}});
+      rows=ReaderPageIndex.domRows().map(ReaderPageIndex.metadata);loadBody=async id=>ReaderPageIndex.domBody(id);
+      loadedVersion=ReaderPageIndex.sample();partial=true;group();render();
+      const data=await read(ctl,step=>{if(!ctl.signal.aborted)progress.update(step);});
       if(ctl.signal.aborted||n!==routeEpoch)return;
       if(typeof data.loadBody!=="function")throw Error("Navigation body provider unavailable.");
       rows=ReaderPageIndex.mergeMounted(data.rows.map(ReaderPageIndex.metadata));loadBody=data.loadBody;partial=!data.complete;loadedVersion=ReaderPageIndex.sample();group();render();
-    }catch{if(!ctl.signal.aborted&&n===routeEpoch){partial=true;notice=L("完整目录未读取，可重试。","The full outline could not be read. Retry.");}}
-    finally{if(readCtl===ctl){readCtl=null;if(find&&query.value.trim())void runSearch();else paintStatus();}}
+    }catch(e){if(!ctl.signal.aborted&&n===routeEpoch){partial=true;const reason=ReaderProgress.sourceReason(e?.code,navigator.language.startsWith("zh"));
+      notice=[reason,L("完整目录未读取，可重试。","The full outline could not be read. Retry.")].filter(Boolean).join(" · ");}}
+    finally{try{progress.flush();}finally{progress.close();if(readCtl===ctl){readCtl=null;if(find&&query.value.trim())void runSearch();else paintStatus();}}}
   }
   async function open(want,remember=true){
     if(!ReaderRoutes.eligible(location.pathname))return;
+    if(want==="outline"&&view==="outline"&&!frameBox.hidden&&readCtl)return;
     const n=++routeEpoch;readCtl?.abort();readCtl=null;stopPreview();stopSearch();stopJump();frame=null;
     for(const f of privateFrames.values())f.hidden=true;
     view=want==="import"?"import":ReaderRoutes.chat(location.pathname)?want:"library";outlineButton.hidden=!ReaderRoutes.chat(location.pathname);

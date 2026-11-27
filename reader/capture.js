@@ -101,8 +101,8 @@
     };
   }
   function contentLength(headers){return !headers?.get("Content-Encoding")?Number(headers?.get("Content-Length"))||undefined:undefined;}
-  function readBranch(id,controller,request,check,report,batch=false){const marker=batch?undefined:leaf();return FastTextExporter.loadConversation({id,leafId:marker,fetch:request,
-    signal:controller.signal,retainRaw:false,sourcePaths:true,readerSource:ReaderSourceFile.conversation(id,marker,check,report)});}
+  function readBranch(id,controller,request,check,report,batch=false,checkpoint){const marker=batch?undefined:leaf();return FastTextExporter.loadConversation({id,leafId:marker,fetch:request,
+    signal:controller.signal,retainRaw:false,sourcePaths:true,readerSource:ReaderSourceFile.conversation(id,marker,check,report,checkpoint)});}
   function verifyVisible(data){
     if(!source.verify(data))throw problem("SOURCE_BRANCH_UNVERIFIED",text("无法确认当前分支。","Current branch could not be verified."));
   }
@@ -215,18 +215,35 @@
   globalThis.ReaderWorkspace?.({capture:save,busy:()=>!!cancelCapture});
   ReaderOverlay({busy:()=>!!cancelCapture,read:async(controller,onProgress=()=>{})=>{
     const route=location.pathname,id=pathId();if(!id)throw Error("No conversation");
-    const version=ReaderPageIndex.sample(),check=()=>{controller.signal.throwIfAborted();if(route!==location.pathname||version!==ReaderPageIndex.sample())throw Error("Source changed");};
-    const data=await readBranch(id,controller,sourceRequest(controller,check,onProgress),check,onProgress);check();verifyVisible(data);
-    const rows=[];let count=0,lastYield=performance.now();
-    for await(const m of data.rows()){
-      source.remember(m);
-      check();rows.push(...ReaderPageIndex.fromBranch({messages:[m]}).map(ReaderPageIndex.metadata));
-      if(++count%32===0)onProgress({stage:"index",done:count});
-      if(performance.now()-lastYield>12){await new Promise(r=>setTimeout(r,0));lastYield=performance.now();}
+    const version=ReaderPageIndex.sample();
+    const changed=()=>problem("SOURCE_BRANCH_UNVERIFIED","Source changed");
+    function check(){
+      controller.signal.throwIfAborted();
+      if(location.pathname!==route||ReaderPageIndex.revision()!==version)throw changed();
     }
-    onProgress({stage:"index",done:count});
+    function verifyVersion(){check();if(ReaderPageIndex.sample()!==version)throw changed();}
+    // The parser owns a frozen Blob. Poll cancellation/revision inside it; fingerprint
+    // the live transcript at each request, after branch selection and before publishing.
+    let deadline=performance.now()+10;
+    function checkpoint(checkedBytes,checkTotal,page){
+      if(performance.now()<deadline)return;
+      if(page!==undefined)onProgress({stage:"index",pages:page,checkedBytes,checkTotal});
+      const turn=globalThis.scheduler?.yield?.()??new Promise(resolve=>setTimeout(resolve,0));
+      return turn.then(()=>{check();deadline=performance.now()+10;});
+    }
+    const request=sourceRequest(controller,verifyVersion,onProgress);
+    const data=await readBranch(id,controller,(...args)=>{onProgress({stage:"source"});return request(...args);},check,onProgress,false,checkpoint);
+    verifyVersion();verifyVisible(data);
+    const rows=[];let count=0;
+    onProgress({stage:"messages",done:0});
+    for await(const m of data.rows()){
+      check();source.remember(m);rows.push(...ReaderPageIndex.fromBranch({messages:[m]}).map(ReaderPageIndex.metadata));
+      if(++count%32===0)onProgress({stage:"messages",done:count});
+      const pause=checkpoint();if(pause)await pause;
+    }
+    onProgress({stage:"messages",done:count});verifyVersion();verifyVisible(data);
     return {rows,complete:!data.warnings?.length,loadBody:async(id,signal)=>{
-      signal?.throwIfAborted();check();const row=await data.row(id);signal?.throwIfAborted();check();
+      signal?.throwIfAborted();verifyVersion();const row=await data.row(id);signal?.throwIfAborted();verifyVersion();
       if(!row)throw Error("Message unavailable");return ReaderVisible(row,FastTextExporter).body||"";
     }};
   }});

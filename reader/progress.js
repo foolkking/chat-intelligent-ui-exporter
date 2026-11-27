@@ -110,6 +110,9 @@ globalThis.ReaderProgress = (() => {
       if (count(value[key])) step[key] = value[key];
     }
     if (!step.total || step.done > step.total) delete step.total;
+    if(step.stage==="index"&&count(value.checkedBytes)&&count(value.checkTotal)&&value.checkedBytes<=value.checkTotal){
+      step.checkedBytes=value.checkedBytes;step.checkTotal=value.checkTotal;
+    }
     return Object.assign(step, measurements(value));
   }
   function size(n) {
@@ -127,7 +130,8 @@ globalThis.ReaderProgress = (() => {
       package: L("生成导入包", "Preparing archive"), upload: L("上传到 Reader", "Uploading to Reader")
     };
     const parts = [labels[step.stage]];
-    if (step.stage === "source" && step.pages) parts.push(L(`第 ${step.pages} 页`, `page ${step.pages}`));
+    if ((step.stage === "source" || step.checkedBytes!==undefined) && step.pages) parts.push(L(`第 ${step.pages} 页`, `page ${step.pages}`));
+    if(step.checkedBytes!==undefined)parts.push(size(step.checkedBytes)+" / "+size(step.checkTotal));
     if (step.stage === "asset" && step.files) parts.push(L(`第 ${step.files} 个`, `file ${step.files}`));
     if (step.done !== undefined) {
       const format = ["index","messages"].includes(step.stage) ? String : size;

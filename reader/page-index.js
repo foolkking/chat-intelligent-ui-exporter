@@ -484,5 +484,5 @@ globalThis.ReaderPageIndex = (() => {
     }
     listener(layout());update();return ()=>layoutListeners.delete(listener);
   }
-  return {mounted,idOf,domRows,domBody,fromBranch,metadata,mergeMounted,sections,tree,search,leaf,sample,visible,currentSection,jump,matches,textTarget,destination,layout,observeLayout,generating};
+  return {mounted,idOf,domRows,domBody,fromBranch,metadata,mergeMounted,sections,tree,search,leaf,sample,revision:()=>revision,visible,currentSection,jump,matches,textTarget,destination,layout,observeLayout,generating};
 })();

@@ -60,6 +60,14 @@
 
 `evidence/plugin-local-2026-11-27.json` 登记日志 SHA-256、命令退出码和精确 revision。日志保存在该任务根，包含红灯与修复后的结果，不覆盖。全部测试沿用原门禁；63 个依赖本机私有夹具的跳过在原基准也存在，未增加 skip。JSDOM 的导航未实现提示也保留，不冒充真实浏览器。
 
+本阶段源码提交：`52ba9f1bf04a880770c10f5c8b524a1f46900bb9`。在该提交运行完整测试：**487 项登记，424 通过、0 失败、0 取消、63 原有跳过**。旧基准：472 项登记、409 通过、0 失败、63 相同跳过。
+
+本机隔离候选：`E:\chat-reader-temp\reader-window-baseline-20261127-150804239\candidate-v031-local\chat-reader-0.3.1.zip`，59 文件，两次打包字节一致并通过中立包重新绑定校验。SHA-256：
+
+`b5f79a504024355c3f19dc71bb4cc19c1c62f2f87a828dd0b71639abbd1cbe45`
+
+此包包含上述局部修复，**不含四轮章节整改，不替代改前测量包**。测量包目录在同一任务根的 `measure-original-01/control` 与 `measure-original-01/counted`。
+
 ```text
 node --test --test-force-exit tests/*.test.cjs
 node scripts/nav-baseline/verify.cjs <已核验的0.3.0私有ZIP>

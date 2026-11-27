@@ -1,0 +1,308 @@
+{
+  "recorded_at": "2026-11-27T16:09:08+08:00",
+  "scope": "browser plugin only",
+  "branch": "codex/plugin-local-chapter-index",
+  "source_commit": "52ba9f1bf04a880770c10f5c8b524a1f46900bb9",
+  "source_tree": "44d8a8c5f32fdb58a970a86e346b14d823f1a3be",
+  "base_installation": {
+    "measured_at": "2026-11-27T15:12:19+08:00",
+    "commit": "6725193cfe6f34e8f15f40f3be0e6c5f775e0d4e",
+    "manifest_version": "0.3.0",
+    "zip_sha256": "3638a1d71d4c18d979581592d704e534af66551f93d353696389fa7ead1a9e79",
+    "zip_bytes": 226911,
+    "files_checked": 59,
+    "file_set_equal": true,
+    "every_file_sha256_equal": true,
+    "installation_scope": "desktop unpacked directory",
+    "browser_loaded_version": null
+  },
+  "remote_ref": {
+    "branch": "codex/reader-extension",
+    "sha": "6725193cfe6f34e8f15f40f3be0e6c5f775e0d4e",
+    "observed_at": "2026-11-27T16:07:53+08:00",
+    "access": "configured Git SSH; no Actions query"
+  },
+  "status": {
+    "local_changes_verified": true,
+    "three_review_scope": "this partial plugin repair and measurement kit only",
+    "core_local_chapters_implemented": false,
+    "real_long_baseline_received": false,
+    "real_browser_verification": false,
+    "real_screenshots": false,
+    "final_server_receipt": false,
+    "production_deployed": false,
+    "desktop_installation_changed": false,
+    "remote_push": false,
+    "ci_status": "not queried"
+  },
+  "measurement_kit": {
+    "baseCommit": "6725193cfe6f34e8f15f40f3be0e6c5f775e0d4e",
+    "baseZip": "3638a1d71d4c18d979581592d704e534af66551f93d353696389fa7ead1a9e79",
+    "builds": {
+      "control": {
+        "sha256": "414ba4145666adbcde04cbea2f0c24e218c64b10bf105c6f67018a5a119bf22a",
+        "bytes": 229578,
+        "files": 60
+      },
+      "counted": {
+        "sha256": "e76d9eb8b41a830567b654130a373094e2a1332267551afe8a4244cd42b777e7",
+        "bytes": 230022,
+        "files": 60
+      }
+    }
+  },
+  "loopback_candidate": {
+    "version": "0.3.1",
+    "path": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\candidate-v031-local\\chat-reader-0.3.1.zip",
+    "bytes": 229339,
+    "sha256": "b5f79a504024355c3f19dc71bb4cc19c1c62f2f87a828dd0b71639abbd1cbe45",
+    "files": 59,
+    "origin": "http://127.0.0.1:18383",
+    "source_commit": "52ba9f1bf04a880770c10f5c8b524a1f46900bb9",
+    "installed": false
+  },
+  "final_commands": {
+    "plugin-full-03": {
+      "start": "2026-11-27T16:05:33.8246768+08:00",
+      "node": "v24.22.3",
+      "command": "node --test --test-force-exit tests/*.test.cjs",
+      "end": "2026-11-27T16:06:12.0442243+08:00",
+      "commit": "52ba9f1bf04a880770c10f5c8b524a1f46900bb9",
+      "exit_code": 0
+    },
+    "kit-verify-03": {
+      "command": "node scripts/nav-baseline/verify.cjs <pinned 0.3.0 ZIP>",
+      "exit_code": 0,
+      "start": "2026-11-27T16:05:33.8805753+08:00",
+      "commit": "52ba9f1bf04a880770c10f5c8b524a1f46900bb9",
+      "end": "2026-11-27T16:05:36.2805761+08:00"
+    },
+    "candidate-build-01": {
+      "end": "2026-11-27T16:05:34.3729479+08:00",
+      "start": "2026-11-27T16:05:33.8963262+08:00",
+      "command": "node scripts/package-reader.cjs http://127.0.0.1:18383 <fresh directory> --zip",
+      "exit_code": 0,
+      "commit": "52ba9f1bf04a880770c10f5c8b524a1f46900bb9"
+    },
+    "candidate-distribution-01": {
+      "commit": "52ba9f1bf04a880770c10f5c8b524a1f46900bb9",
+      "end": "2026-11-27T16:07:39.4555685+08:00",
+      "start": "2026-11-27T16:07:38.6053121+08:00",
+      "exit_code": 0,
+      "command": "build loopback twice, build neutral; verify-reader-distribution.cjs --test-only; compare SHA-256",
+      "sha256": "b5f79a504024355c3f19dc71bb4cc19c1c62f2f87a828dd0b71639abbd1cbe45",
+      "local_reproducible": true
+    }
+  },
+  "test_history": [
+    {
+      "file": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\center-red-01.log",
+      "sha256": "340ebad7cfc72170aed3a65f87d41a7fd22d78795b7ee2c2d7bbdb5011ed7d22",
+      "exit_code": 1,
+      "note": "Node 20.13.1; two newly added regression cases, before fixes",
+      "counts": {
+        "tests": 34,
+        "pass": 0,
+        "fail": 2,
+        "cancelled": 0,
+        "skipped": 32
+      }
+    },
+    {
+      "file": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\recovery-red-01.log",
+      "sha256": "b06c0388dfe13d1ec49e8f0d1e1ccc04454dd37b7aadaf65e1cc3ed6d273c425",
+      "exit_code": 1,
+      "note": "Node 20.13.1; recovery contract before implementation",
+      "counts": {
+        "tests": 13,
+        "pass": 1,
+        "fail": 2,
+        "cancelled": 0,
+        "skipped": 10
+      }
+    },
+    {
+      "file": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\plugin-focused-01.log",
+      "sha256": "1327ff7feebeed9769b4bb25a4fde122f5d74d0503ead79702a46e25d80376cc",
+      "exit_code": 0,
+      "note": "Node 20.13.1; center/progress/contracts",
+      "counts": {
+        "tests": 53,
+        "pass": 53,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "file": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\recovery-focus-01.log",
+      "sha256": "147947bcb57583417ad25c180c469371e5fe4f2527cd0929a5f8a12c391c768c",
+      "exit_code": 0,
+      "note": "Node 24.22.3; recovery and center/progress/contracts",
+      "counts": {
+        "tests": 73,
+        "pass": 73,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "file": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\review2-red-01.log",
+      "sha256": "51eeb38afc1f57a89afc532e7fef0dff5a441ab12bb8e9f9aa50055d7f4d4ad4",
+      "exit_code": 1,
+      "note": "Node 24.22.3; account/receipt/privacy review counterexamples",
+      "counts": {
+        "tests": 3,
+        "pass": 0,
+        "fail": 3,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "file": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\review2-focus-01.log",
+      "sha256": "12603cc80404561f99045f7b8077a9fe997d5824a525a9d9ba983c580485690e",
+      "exit_code": 1,
+      "note": "Node 24.22.3; retained reminder and generic uploader regression",
+      "counts": {
+        "tests": 92,
+        "pass": 90,
+        "fail": 2,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "file": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\review2-focus-02.log",
+      "sha256": "f6227faa423fc1d3c547183c5971fbfc4cfa70b6e7313d741155b5a6203170f7",
+      "exit_code": 0,
+      "note": "Node 24.22.3; corrected real HTTP boundary without changing old assertions",
+      "counts": {
+        "tests": 73,
+        "pass": 73,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "file": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\original-full-01.log",
+      "sha256": "22dc3e47cc946c4096ece4def7cb094e474b322f4484e2cf7f637d865ad2c6a8",
+      "exit_code": 0,
+      "note": "Node 24.22.3; unchanged original 6725193 worktree",
+      "counts": {
+        "tests": 472,
+        "pass": 409,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 63
+      }
+    },
+    {
+      "file": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\plugin-full-01.log",
+      "sha256": "acc90fdcd7496311a8ddf43d7b52d2c85f0a4b384f91caac7130ff7f4d530e11",
+      "exit_code": 0,
+      "note": "Node 24.22.3; intermediate candidate",
+      "counts": {
+        "tests": 477,
+        "pass": 414,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 63
+      }
+    },
+    {
+      "file": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\plugin-full-02.log",
+      "sha256": "70b811a08e79444f751ffa811b3cda33097ba9ad681f9fff4b1f5ca6af5b27ff",
+      "exit_code": 0,
+      "note": "Node 24.22.3; intermediate candidate",
+      "counts": {
+        "tests": 485,
+        "pass": 422,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 63
+      }
+    },
+    {
+      "file": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\panel-test-01.log",
+      "sha256": "cb50df1b3f1516c6db39c6c56b4b7dca900e66063f5ff2103fd0b258549d7c74",
+      "exit_code": 1,
+      "note": "Node 24.22.3; invalid synthetic non-UUID fixture correctly rejected",
+      "counts": {
+        "tests": 2,
+        "pass": 0,
+        "fail": 2,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "file": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\panel-test-02.log",
+      "sha256": "0bcaff1dd27ca32971166f9938ef841fc00f310c88748139477b32dfbb261f34",
+      "exit_code": 0,
+      "note": "Node 24.22.3; valid UUID fixture, original target assertion retained",
+      "counts": {
+        "tests": 2,
+        "pass": 2,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "file": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\plugin-full-03.log",
+      "sha256": "b0226eb659a082e55cc5f19b58e2bf0a6b9b81fc90592d189e3b8385af338231",
+      "exit_code": 0,
+      "note": "Node 24.22.3; exact final source commit",
+      "counts": {
+        "tests": 487,
+        "pass": 424,
+        "fail": 0,
+        "cancelled": 0,
+        "skipped": 63
+      }
+    }
+  ],
+  "additional_evidence": [
+    {
+      "path": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\refs-at-start.json",
+      "sha256": "778516354aff13b21eb34ddd57ea52134e625a05bf1166145e05bb9ce3ed82e6"
+    },
+    {
+      "path": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\install-preflight.json",
+      "sha256": "e486a2450a5ea34ce903cf378853231ba402727d0b3c52d2f9420777f36daec8"
+    },
+    {
+      "path": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\kit-build-01.log",
+      "sha256": "c6c356c6511d0cf795766b37cc799854f4b1dac20a206a97197209f9ff26b5b9"
+    },
+    {
+      "path": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\kit-verify-01.log",
+      "sha256": "f314b3a3c8fd71dadab49396ea6deadefa4a9e801cf42daee89a913fe8e75c18"
+    },
+    {
+      "path": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\kit-verify-02.log",
+      "sha256": "f314b3a3c8fd71dadab49396ea6deadefa4a9e801cf42daee89a913fe8e75c18"
+    },
+    {
+      "path": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\kit-verify-03.log",
+      "sha256": "f314b3a3c8fd71dadab49396ea6deadefa4a9e801cf42daee89a913fe8e75c18"
+    },
+    {
+      "path": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\candidate-build-01.log",
+      "sha256": "2030e4afc92cbe9ef90db75048cbcaf0f1dd39ee9f71f64bfe21f4a4f6157932"
+    },
+    {
+      "path": "E:\\chat-reader-temp\\reader-window-baseline-20261127-150804239\\candidate-distribution-01.log",
+      "sha256": "29e40d6f34e7f694eeda752fdb1673302cd8eafac085c848e9dd94feaf8f45c4"
+    }
+  ],
+  "limitations": [
+    "487 registered cases; 424 pass; zero fail/cancel; same 63 existing private-fixture skips as 6725193, no new skip introduced",
+    "JSDOM navigation-not-implemented warning retained; not a real browser result",
+    "No actual long conversation metrics, screenshots, final imports or optimized chapter-window code",
+    "Performance probes not packaged in the candidate; measured packages remain original 0.3.0 code"
+  ]
+}
